@@ -1,0 +1,54 @@
+{# Review table shared by the source page and the review queue. #}
+{% macro product_datalist(products) %}
+<datalist id="product-options">
+  {% for p in products %}<option value="{{ p.name_es }} [{{ p.slug }}]">{{ p.name_ca or '' }} · {{ p.base_unit }}</option>{% endfor %}
+</datalist>
+{% endmacro %}
+
+{% macro obs_table(rows, back, show_store=False) %}
+<div class="table-wrap">
+<table>
+  <thead><tr>
+    {% if show_store %}<th>Store</th>{% else %}<th class="num">Page</th>{% endif %}
+    <th>As printed</th><th>Size</th><th class="num">Price</th><th class="num">Unit price</th><th>Promo</th>
+    <th>Product</th><th>Actions</th>
+  </tr></thead>
+  <tbody>
+  {% for o in rows %}
+  <tr id="obs-{{ o.id }}" class="{{ 'needs-review' if o.needs_review }}">
+    {% if show_store %}<td>{{ o.store_name }}<div class="note">{{ o.observed_on }}</div></td>{% else %}<td class="num">{{ o.page or '' }}</td>{% endif %}
+    <td>{{ o.raw_name }}{% if o.brand %} · {{ o.brand }}{% endif %}
+      {% if o.generic_name %}<div class="note">“{{ o.generic_name }}”</div>{% endif %}</td>
+    <td class="small">{{ o.quantity_text or '' }}{% if o.amount %}<div class="note">= {{ '%g' | format(o.amount) }} {{ o.unit }}{% if o.approx %} approx.{% endif %}{% if o.sold_by_measure %} (priced per {{ o.unit }}){% endif %}</div>{% endif %}</td>
+    <td class="num">{{ o.price | eur }}{% if o.regular_price %}<div class="note"><s>{{ o.regular_price | eur }}</s></div>{% endif %}</td>
+    <td class="num">{{ o.unit_price | unit_price(o.price_unit) }}
+      {% if o.printed_unit_price %}<div class="note">printed {{ o.printed_unit_price | eur }}/{{ o.printed_unit }}</div>{% endif %}</td>
+    <td class="small">{{ o.promo_text or '' }}{% if o.loyalty_only %} <span class="badge warn">card/app</span>{% endif %}</td>
+    <td>
+      {% if o.product_id %}<a href="/products/{{ o.product_id }}">{{ o.product_name }}</a>
+        {% if o.match_method == 'phrase' and o.match_score < 0.5 %}<span class="badge">guess</span>{% endif %}
+      {% else %}<span class="muted">not matched</span>{% endif %}
+      {% if o.review_notes %}<div class="note">⚠ {{ o.review_notes }}</div>{% endif %}
+    </td>
+    <td>
+      <div class="row-actions">
+        <form method="post" action="/observations/{{ o.id }}/assign">
+          <input type="hidden" name="back" value="{{ back }}">
+          <input type="text" name="product" list="product-options" placeholder="Assign product…" aria-label="Assign product">
+          <button class="small secondary" type="submit">Set</button>
+        </form>
+        {% if o.needs_review %}
+        <form method="post" action="/observations/{{ o.id }}/ok"><input type="hidden" name="back" value="{{ back }}"><button class="small secondary" type="submit">OK</button></form>
+        {% endif %}
+        <a class="small" href="/products?name={{ (o.generic_name or o.raw_name) | urlencode }}&obs={{ o.id }}">new product</a>
+        <form method="post" action="/observations/{{ o.id }}/delete"><input type="hidden" name="back" value="{{ back }}"><button class="small danger" type="submit" title="Delete this item">✕</button></form>
+      </div>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="8" class="empty">Nothing here.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endmacro %}

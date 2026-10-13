@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Compare{% endblock %}
+{% block content %}
+<h1>Best prices</h1>
+<p class="lead">Cheapest offer per product at each store, normalized to €/kg, €/L or €/unit. Latest data per store from the last {{ days }} days.</p>
+
+<div class="tiles">
+  <div class="tile"><div class="value">{{ n_products }}</div><div class="label">products compared</div></div>
+  <div class="tile"><div class="value">{{ stats.stores_seen }}</div><div class="label">stores with data</div></div>
+  <div class="tile"><div class="value">{{ stats.observations }}</div><div class="label">prices recorded</div></div>
+  <div class="tile"><div class="value"><a href="/review">{{ stats.needs_review }}</a></div><div class="label">items to review</div></div>
+</div>
+
+<form class="filters" method="get">
+  <select name="days" aria-label="Period">
+    {% for d, label in [(7, "Last 7 days"), (30, "Last 30 days"), (90, "Last 90 days"), (365, "Last year")] %}
+    <option value="{{ d }}" {{ 'selected' if d == days }}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <input type="search" name="q" value="{{ q }}" placeholder="Search: leche, plàtan…" aria-label="Search">
+  <select name="category" aria-label="Category">
+    <option value="">All categories</option>
+    {% for c in CATEGORIES %}<option {{ 'selected' if c == category }}>{{ c }}</option>{% endfor %}
+  </select>
+  <label class="inline"><input type="checkbox" name="expired" value="1" {{ 'checked' if expired }}> include expired offers</label>
+  <button type="submit">Apply</button>
+</form>
+
+{% if not groups %}
+  <div class="card empty">
+    No comparable prices yet. <a href="/flyers">Upload a flyer</a>, fetch the Mercadona shop, or
+    <a href="/import">add prices</a> by hand or from a CSV.
+  </div>
+{% endif %}
+
+{% for cat, rows in groups.items() %}
+<h2>{{ cat }}</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr>
+    <th>Product</th><th class="num">Best price</th><th>Where</th><th>Offer</th><th>Other stores</th><th class="num">Spread</th>
+  </tr></thead>
+  <tbody>
+  {% for p in rows %}
+    {% set b = p.best %}
+    <tr>
+      <td><a href="/products/{{ p.id }}">{{ p.name_es }}</a>{% if p.name_ca and p.name_ca != p.name_es %}<div class="note">{{ p.name_ca }}</div>{% endif %}</td>
+      <td class="num price-best">{{ b.unit_price | unit_price(p.base_unit) }}
+        {% if b.effective_unit_price and b.effective_unit_price < b.unit_price - 0.005 %}
+          <div class="note">{{ b.effective_unit_price | unit_price(p.base_unit) }} with {{ b.promo_text }}</div>
+        {% endif %}
+      </td>
+      <td>{{ b.store_name }}{% if b.loyalty_only %} <span class="badge warn" title="Needs the store's card or app">card/app</span>{% endif %}</td>
+      <td>
+        {{ b.raw_name }}{% if b.brand %} · {{ b.brand }}{% endif %}
+        <div class="note">{{ b.price | eur }}{% if b.quantity_text %} · {{ b.quantity_text }}{% endif %}{% if b.valid_to %} · until {{ b.valid_to }}{% endif %}{% if b.approx %} · approx. weight{% endif %}</div>
+      </td>
+      <td>
+        {% for s in p.stores[1:] %}
+          <span class="chip" title="{{ s.raw_name }} · {{ s.price | eur }} · {{ s.observed_on }}">{{ s.store_name }} <b>{{ s.unit_price | eur }}</b></span>
+        {% else %}<span class="muted small">only one store so far</span>{% endfor %}
+      </td>
+      <td class="num">{% if p.stores|length > 1 %}+{{ (p.spread * 100) | round | int }}%{% else %}–{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endfor %}
+{% endblock %}

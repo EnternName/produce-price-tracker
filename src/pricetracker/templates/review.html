@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% from "_obs_rows.html" import obs_table, product_datalist %}
+{% block title %}Review{% endblock %}
+{% block content %}
+<h1>Review</h1>
+<p class="lead">Items the importer was unsure about. Fix the product match, confirm with OK, or delete. Items that are not matched to a product don't show up in comparisons.</p>
+{{ product_datalist(products) }}
+{{ obs_table(rows, '/review', show_store=True) }}
+{% endblock %}

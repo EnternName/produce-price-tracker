@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% from "_obs_rows.html" import obs_table, product_datalist %}
+{% block title %}{{ source.title or 'Source' }}{% endblock %}
+{% block head %}{% if source.status in ('pending', 'processing') %}<meta http-equiv="refresh" content="4">{% endif %}{% endblock %}
+{% block content %}
+<h1>{{ source.store_name }} · {{ source.title or source.kind }}</h1>
+<p class="lead">
+  {{ source.kind }} · seen {{ source.observed_on }}
+  {% if source.valid_from or source.valid_to %} · valid {{ source.valid_from or '?' }} → {{ source.valid_to or '?' }}{% endif %}
+  {% if source.language %} · language: {{ source.language }}{% endif %}
+  {% if source.region %} · region {{ source.region }}{% endif %}
+</p>
+
+<div class="card" style="margin-bottom:16px">
+  <span class="status-{{ source.status }}"><b>{{ source.status }}</b></span>
+  {% if source.pages_total %} · {{ source.pages_done }}/{{ source.pages_total }} pages read{% endif %}
+  {% if source.input_tokens %} · Claude usage: {{ source.input_tokens }} input / {{ source.output_tokens }} output tokens{% endif %}
+  {% if source.status in ('pending', 'processing') %}<span class="muted"> · this page refreshes by itself</span>{% endif %}
+  {% if source.error %}<div class="status-error small" style="margin-top:6px">{{ source.error }}</div>{% endif %}
+  <div class="form-actions">
+    {% if source.kind == 'flyer' and source.status not in ('pending', 'processing') %}
+    <form method="post" action="/sources/{{ source.id }}/reprocess"><button class="secondary" type="submit">Read again</button></form>
+    {% endif %}
+    <a class="small" href="?review={{ 0 if review else 1 }}">{{ 'Show all items' if review else 'Show only items to review' }}</a>
+    <form method="post" action="/sources/{{ source.id }}/delete" onsubmit="return confirm('Delete this source and all its prices?')"><button class="danger" type="submit">Delete source</button></form>
+  </div>
+</div>
+
+<p class="note">Highlighted rows need a look: no product match, a unit price that disagrees with the one the store printed, or a size that could not be read. Assign a product to teach the matcher; it remembers the name next time.</p>
+{% if total > rows|length %}<p class="note">Showing {{ rows|length }} of {{ total }} items: items to review first, then matched products.</p>{% endif %}
+{{ product_datalist(products) }}
+{{ obs_table(rows, '/sources/' ~ source.id ~ ('?review=1' if review else '')) }}
+{% endblock %}
