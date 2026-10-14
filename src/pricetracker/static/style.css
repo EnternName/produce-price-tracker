@@ -125,3 +125,4 @@ tr:target td { outline: 2px solid var(--accent); outline-offset: -2px; }
   .chart-box { height: 260px; }
 }
 form.card input:not([type=checkbox]):not([type=hidden]), form.card select { width: 100%; }
+code { overflow-wrap: anywhere; }
