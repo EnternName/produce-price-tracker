@@ -2,7 +2,7 @@
 {% block title %}Flyers & sources{% endblock %}
 {% block content %}
 <h1>Flyers &amp; sources</h1>
-<p class="lead">Upload a flyer (PDF, or screenshots/photos of its pages from the flyer app) and Claude reads every offer. Or pull prices straight from a store.</p>
+<p class="lead">Upload a flyer (PDF, or screenshots/photos of its pages from the flyer app) and Claude reads every offer. Or pull prices straight from a store. Browsing flyers in Firefox? The <a href="/extension">browser add-on</a> sends them here in one click.</p>
 
 <div class="cards">
   <form class="card" method="post" action="/flyers" enctype="multipart/form-data">
@@ -60,7 +60,7 @@
     <td>{{ s.store_name }}</td>
     <td><a href="/sources/{{ s.id }}">{{ s.title or s.kind }}</a><div class="note">{{ s.kind }}{% if s.language %} · {{ s.language }}{% endif %}</div></td>
     <td class="small">{% if s.valid_from or s.valid_to %}{{ s.valid_from or '?' }} → {{ s.valid_to or '?' }}{% else %}{{ s.observed_on }}{% endif %}</td>
-    <td class="small status-{{ s.status }}">{{ s.status }}{% if s.status == 'processing' and s.pages_total %} {{ s.pages_done }}/{{ s.pages_total }}{% endif %}{% if s.error %}<div class="note">{{ s.error[:120] }}</div>{% endif %}</td>
+    <td class="small status-{{ s.status }}">{{ 'collecting pages' if s.collecting else s.status }}{% if s.status == 'processing' and s.pages_total %} {{ s.pages_done }}/{{ s.pages_total }}{% endif %}{% if s.error %}<div class="note">{{ s.error[:120] }}</div>{% endif %}</td>
     <td class="num">{{ s.n_items }}</td>
     <td class="num">{% if s.n_review %}<a href="/sources/{{ s.id }}?review=1">{{ s.n_review }}</a>{% else %}0{% endif %}</td>
   </tr>

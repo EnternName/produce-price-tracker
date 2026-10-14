@@ -147,7 +147,15 @@ class ClaudeExtractor:
         context = f"Store: {store_name}. Page {page.number} of {total_pages}. Today is {today}."
         if len(page.images) > 1:
             context += f" The {len(page.images)} images are overlapping top-to-bottom slices of this one page."
-        if page.text_layer.strip():
+        if not page.images:
+            # Text copied from a store web page listing offers (sent by the browser add-on).
+            context += (
+                "\n\nNo image this time: below is the visible text of a page on the store's website that lists "
+                "products with prices (an offers or flyer page). Apply the same rules to every priced product in it."
+                + (f" Page address: {page.extra['url']}" if page.extra.get("url") else "")
+                + "\n\n" + page.text_layer
+            )
+        elif page.text_layer.strip():
             context += (
                 "\n\nThe PDF's embedded text for this page follows (may be incomplete or out of order; "
                 "use it to read small print accurately, but trust the image for layout):\n"

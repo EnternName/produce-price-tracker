@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% from "_obs_rows.html" import obs_table, product_datalist %}
 {% block title %}{{ source.title or 'Source' }}{% endblock %}
-{% block head %}{% if source.status in ('pending', 'processing') %}<meta http-equiv="refresh" content="4">{% endif %}{% endblock %}
+{% block head %}{% if source.status in ('pending', 'processing') and not source.collecting %}<meta http-equiv="refresh" content="4">{% endif %}{% endblock %}
 {% block content %}
 <h1>{{ source.store_name }} · {{ source.title or source.kind }}</h1>
 <p class="lead">
@@ -12,13 +12,18 @@
 </p>
 
 <div class="card" style="margin-bottom:16px">
+  {% if source.collecting %}
+  <b>Collecting pages from the browser add-on</b> · {{ files_count }} file(s) so far.
+  <form method="post" action="/sources/{{ source.id }}/finish" style="display:inline"><button type="submit">Read now</button></form>
+  {% else %}
   <span class="status-{{ source.status }}"><b>{{ source.status }}</b></span>
+  {% endif %}
   {% if source.pages_total %} · {{ source.pages_done }}/{{ source.pages_total }} pages read{% endif %}
   {% if source.input_tokens %} · Claude usage: {{ source.input_tokens }} input / {{ source.output_tokens }} output tokens{% endif %}
-  {% if source.status in ('pending', 'processing') %}<span class="muted"> · this page refreshes by itself</span>{% endif %}
+  {% if source.status in ('pending', 'processing') and not source.collecting %}<span class="muted"> · this page refreshes by itself</span>{% endif %}
   {% if source.error %}<div class="status-error small" style="margin-top:6px">{{ source.error }}</div>{% endif %}
   <div class="form-actions">
-    {% if source.kind == 'flyer' and source.status not in ('pending', 'processing') %}
+    {% if source.kind == 'flyer' and source.status not in ('pending', 'processing') and not source.collecting %}
     <form method="post" action="/sources/{{ source.id }}/reprocess"><button class="secondary" type="submit">Read again</button></form>
     {% endif %}
     <a class="small" href="?review={{ 0 if review else 1 }}">{{ 'Show all items' if review else 'Show only items to review' }}</a>

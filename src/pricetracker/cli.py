@@ -22,9 +22,18 @@ def cmd_init(args):
 
 
 def cmd_serve(args):
+    import os
+
     import uvicorn
 
     from .web import app
+
+    if args.host in ("0.0.0.0", "::"):
+        print("Listening on all interfaces: open the app as http://<this computer's IP>:"
+              f"{args.port} after adding that IP to PRICETRACKER_ALLOWED_HOSTS.")
+    elif args.host not in ("127.0.0.1", "localhost", "::1"):
+        current = os.environ.get("PRICETRACKER_ALLOWED_HOSTS", "")
+        os.environ["PRICETRACKER_ALLOWED_HOSTS"] = ",".join(filter(None, [current, args.host]))
 
     app.state.db_path = Path(args.db)
     uvicorn.run(app, host=args.host, port=args.port)

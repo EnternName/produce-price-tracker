@@ -3,6 +3,11 @@ import pytest
 from pricetracker import db
 
 
+@pytest.fixture(autouse=True)
+def _allow_testclient_host(monkeypatch):
+    monkeypatch.setenv("PRICETRACKER_ALLOWED_HOSTS", "testserver")
+
+
 @pytest.fixture
 def conn():
     connection = db.connect(":memory:")

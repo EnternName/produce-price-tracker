@@ -135,3 +135,12 @@ def test_claude_request_shape(flyer_pdf):
     content = body["messages"][0]["content"]
     assert content[0]["type"] == "image" and content[0]["source"]["media_type"] == "image/jpeg"
     assert "Store: Lidl. Page 1 of 2" in content[-1]["text"]
+
+
+def test_reused_source_id_gets_a_clean_folder(conn, flyer_pdf):
+    first = flyers.create_flyer_source(conn, store="Lidl", files=[flyer_pdf])
+    conn.execute("DELETE FROM sources")  # e.g. a reset database, with the old files still on disk
+    second = flyers.create_flyer_source(conn, store="Lidl", collecting=True)
+    assert second == first  # SQLite reuses the id...
+    row = conn.execute("SELECT file_path FROM sources WHERE id = ?", (second,)).fetchone()
+    assert flyers.source_files(row["file_path"]) == []  # ...but not the old pages

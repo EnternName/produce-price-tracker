@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS sources (
     error TEXT,
     input_tokens INTEGER,   -- Claude usage for flyer extraction
     output_tokens INTEGER,
+    collecting INTEGER NOT NULL DEFAULT 0,  -- draft still receiving pages from the browser add-on
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -116,8 +117,9 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Create tables and (idempotently) seed stores and the catalog."""
+    """Create tables, apply column additions to older databases, and (idempotently) seed data."""
     conn.executescript(SCHEMA)
+    _add_missing_columns(conn)
     conn.executemany(
         "INSERT OR IGNORE INTO stores (slug, name, website) VALUES (?, ?, ?)",
         [(s.slug, s.name, s.website) for s in STORES],
@@ -133,6 +135,19 @@ def init_db(conn: sqlite3.Connection) -> None:
             [(product_id, alias) for alias in dict.fromkeys((p.name_es, p.name_ca, *p.synonyms))],
         )
     conn.commit()
+
+
+# Columns added after the first release: (table, column, definition)
+_ADDED_COLUMNS = [
+    ("sources", "collecting", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    for table, column, definition in _ADDED_COLUMNS:
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def load_matcher(conn: sqlite3.Connection) -> Matcher:

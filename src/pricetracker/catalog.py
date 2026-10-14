@@ -257,4 +257,5 @@ STORES: tuple[SeedStore, ...] = (
     SeedStore("hipercor", "Hipercor / El Corte Inglés", "https://www.elcorteingles.es/supermercado"),
     SeedStore("plusfresc", "Plusfresc", "https://www.plusfresc.cat"),
     SeedStore("spar", "Spar", "https://www.spar.es"),
+    SeedStore("sorli", "Sorli", "https://www.sorli.com"),
 )

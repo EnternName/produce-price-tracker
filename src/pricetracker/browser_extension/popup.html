@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Price tracker</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="icons/icon-32.png" alt="" width="20" height="20">
+    <h1>Send flyer</h1>
+    <span id="status" class="status" role="status">Checking app…</span>
+  </header>
+
+  <section id="setup-hint" class="notice" hidden></section>
+
+  <section class="fields">
+    <label for="store">Store</label>
+    <input id="store" list="store-list" placeholder="Lidl, Aldi, Bonpreu…" autocomplete="off">
+    <datalist id="store-list"></datalist>
+    <label for="title">Title</label>
+    <input id="title" placeholder="Folleto semana 42">
+  </section>
+
+  <section id="draft" class="draft" hidden>
+    <div><b>Flyer in progress:</b> <span id="draft-count">0</span> file(s) for <span id="draft-store"></span></div>
+    <div class="row">
+      <button id="draft-finish">Read now</button>
+      <button id="draft-open" class="secondary">Open in app</button>
+      <button id="draft-discard" class="secondary danger">Discard</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Found on this page</h2>
+    <p id="scan-summary" class="muted">Looking for the flyer…</p>
+    <ul id="pdf-list" class="list"></ul>
+    <div id="images" hidden>
+      <div id="thumbs" class="thumbs"></div>
+      <button id="send-images">Add page images</button>
+      <p class="muted small">Flip through every page first: online viewers only load the pages you have seen.</p>
+    </div>
+    <ul id="frame-list" class="list"></ul>
+    <button id="send-tab-url" class="secondary" hidden>Send this tab's address</button>
+  </section>
+
+  <section id="text-section" hidden>
+    <h2>Prices on this page</h2>
+    <p id="text-summary" class="muted small"></p>
+    <button id="send-text">Send page text</button>
+    <p class="muted small">Best for store pages that list offers as text: cheaper to read than images, and prices are copied exactly. Scroll to the end first so every product has loaded.</p>
+  </section>
+
+  <section>
+    <h2>Screenshots</h2>
+    <p class="muted small">Works with any viewer: show a page, add it, go to the next page, add it again, then press “Read now”.</p>
+    <div class="row">
+      <button id="shot-visible" class="secondary">Add visible area</button>
+      <button id="shot-full" class="secondary" hidden>Add whole page</button>
+    </div>
+  </section>
+
+  <section id="result" class="result" hidden></section>
+
+  <details id="settings">
+    <summary>Settings</summary>
+    <label for="app-url">App address</label>
+    <input id="app-url" placeholder="http://127.0.0.1:8000">
+    <label for="token">Token (from the app's “Browser add-on” page)</label>
+    <input id="token" type="password" autocomplete="off">
+    <div class="row">
+      <button id="save-settings">Save</button>
+    </div>
+  </details>
+
+  <script src="stores.js"></script>
+  <script src="scan.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

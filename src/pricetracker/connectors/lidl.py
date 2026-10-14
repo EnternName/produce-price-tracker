@@ -51,10 +51,9 @@ def find_leaflets(data) -> list[Leaflet]:
 
     def walk(node):
         if isinstance(node, dict):
-            pdf = next(
-                (v for k, v in node.items() if _PDF_KEY.search(k) and isinstance(v, str) and v.startswith("http")),
-                None,
-            )
+            links = {k: v for k, v in node.items() if _PDF_KEY.search(k) and isinstance(v, str) and v.startswith("http")}
+            # Prefer the regular PDF ("pdfUrl") over a much larger high-resolution one ("hiResPdfUrl").
+            pdf = next((v for k, v in links.items() if "hires" not in k.lower()), None) or next(iter(links.values()), None)
             if pdf and pdf not in found:
                 found[pdf] = Leaflet(
                     title=str(_first(node, "title", "name", "fullTitle", "slug") or "Folleto Lidl"),

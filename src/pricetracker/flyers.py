@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import logging
+import re
+import secrets
 import shutil
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -24,7 +26,10 @@ UPLOAD_DIR = db.DEFAULT_DB_PATH.parent / "flyers"
 MAX_SIDE = 2000  # px; long edge sent to the model
 MAX_ASPECT = 1.6  # taller images (long phone screenshots) are sliced into overlapping tiles
 TILE_OVERLAP = 0.08
-IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".avif", ".gif", ".bmp", ".tif", ".tiff"}
+TEXT_SUFFIX = ".txt"  # visible text of a store web page listing offers (from the browser add-on)
+FLYER_SUFFIXES = IMAGE_SUFFIXES | {".pdf", TEXT_SUFFIX}
+TEXT_CHUNK = 12000  # characters of page text per request
 
 
 def _jpeg(img: Image.Image) -> bytes:
@@ -58,7 +63,7 @@ def slice_image(img: Image.Image) -> list[bytes]:
 
 
 def load_pages(paths: list[Path]) -> list[PageInput]:
-    """PDF pages (with their text layer) and images, in order, as model-ready pages."""
+    """PDF pages (with their text layer), images and saved page text, in order, as model-ready pages."""
     import pypdfium2 as pdfium
 
     pages: list[PageInput] = []
@@ -82,49 +87,126 @@ def load_pages(paths: list[Path]) -> list[PageInput]:
             with Image.open(path) as img:
                 img.load()
                 pages.append(PageInput(len(pages) + 1, slice_image(img)))
+        elif path.suffix.lower() == TEXT_SUFFIX:
+            url, text = _read_page_text(path)
+            for chunk in chunk_text(text):
+                pages.append(PageInput(len(pages) + 1, [], chunk, extra={"url": url}))
         else:
             raise ValueError(f"Unsupported file type: {path.name} (use PDF, PNG, JPEG or WebP)")
     return pages
+
+
+def chunk_text(text: str, size: int = TEXT_CHUNK) -> list[str]:
+    """Split page text at line breaks into pieces of at most `size` characters."""
+    chunks, current, length = [], [], 0
+    for line in text.splitlines():
+        line = line.strip()
+        for piece in (line[i : i + size] for i in range(0, len(line), size)):  # enormous lines are cut
+            if current and length + len(piece) + 1 > size:
+                chunks.append("\n".join(current))
+                current, length = [], 0
+            current.append(piece)
+            length += len(piece) + 1
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+PAGE_TEXT_HEADER = "# page: "
+
+
+def page_text_blob(text: str, url: str | None) -> bytes:
+    header = f"{PAGE_TEXT_HEADER}{url}\n" if url else ""
+    return (header + text).encode("utf-8")
+
+
+def _read_page_text(path: Path) -> tuple[str | None, str]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if text.startswith(PAGE_TEXT_HEADER):
+        first, _, rest = text.partition("\n")
+        return first[len(PAGE_TEXT_HEADER):].strip() or None, rest
+    return None, text
+
+
+def upload_dir(conn: sqlite3.Connection) -> Path:
+    """data/flyers/ next to the database file (UPLOAD_DIR for in-memory databases)."""
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return Path(row["file"]).parent / "flyers" if row and row["file"] else UPLOAD_DIR
+
+
+def _safe_name(name: str) -> str:
+    return re.sub(r"[^\w.\-]+", "_", Path(name).name)[:100] or "page"
 
 
 def create_flyer_source(
     conn: sqlite3.Connection,
     *,
     store: str,
-    files: list[Path],
+    files: list[Path] = (),
     title: str | None = None,
     observed_on: str | None = None,
     valid_from: str | None = None,
     valid_to: str | None = None,
     origin: str | None = None,
-    copy_files: bool = True,
+    collecting: bool = False,
 ) -> int:
-    """Register a flyer (copying its files under data/flyers/<id>/) and return the source id."""
+    """Register a flyer (copying its files under data/flyers/<id>/) and return the source id.
+
+    `collecting=True` opens a draft that more pages can be added to (add_flyer_files) before it is
+    read; the browser add-on uses this to send a flyer one screenshot at a time."""
+    files = list(files)
     sid = db.store_id(conn, store)
     cur = conn.execute(
-        """INSERT INTO sources (store_id, kind, title, origin, observed_on, valid_from, valid_to, status)
-           VALUES (?, 'flyer', ?, ?, ?, ?, ?, 'pending')""",
-        (sid, title or files[0].name, origin or ", ".join(f.name for f in files),
-         observed_on or valid_from or date.today().isoformat(), valid_from, valid_to),
+        """INSERT INTO sources (store_id, kind, title, origin, observed_on, valid_from, valid_to, status, collecting)
+           VALUES (?, 'flyer', ?, ?, ?, ?, ?, 'pending', ?)""",
+        (sid, title or (files[0].name if files else "Folleto"), origin or ", ".join(f.name for f in files) or None,
+         observed_on or valid_from or date.today().isoformat(), valid_from, valid_to, int(collecting)),
     )
     source_id = cur.lastrowid
-    folder = UPLOAD_DIR / str(source_id)
-    if copy_files:
-        folder.mkdir(parents=True, exist_ok=True)
-        for i, f in enumerate(files):
-            shutil.copy(f, folder / f"{i:03d}_{f.name}")
-    else:
-        folder = files[0].parent
+    # Unique folder: ids are reused if the database is reset while old flyer files stay on disk.
+    folder = upload_dir(conn) / f"{source_id}-{secrets.token_hex(3)}"
+    folder.mkdir(parents=True, exist_ok=False)
     conn.execute("UPDATE sources SET file_path = ? WHERE id = ?", (str(folder), source_id))
     conn.commit()
+    add_flyer_files(conn, source_id, files)
     return source_id
 
 
-def _source_files(file_path: str) -> list[Path]:
+def add_flyer_files(conn: sqlite3.Connection, source_id: int, files: list[Path] = (), blobs: list[tuple[str, bytes]] = ()) -> int:
+    """Append files (paths, or (name, bytes) pairs) to a flyer, after the pages it already has.
+    Returns the flyer's file count."""
+    row = conn.execute("SELECT file_path FROM sources WHERE id = ?", (source_id,)).fetchone()
+    if row is None or not row["file_path"]:
+        raise KeyError(source_id)
+    folder = Path(row["file_path"])
+    folder.mkdir(parents=True, exist_ok=True)
+    index = len(source_files(str(folder)))
+    for f in files:
+        shutil.copy(f, folder / f"{index:04d}_{_safe_name(f.name)}")
+        index += 1
+    for name, data in blobs:
+        (folder / f"{index:04d}_{_safe_name(name)}").write_bytes(data)
+        index += 1
+    return index
+
+
+def source_files(file_path: str) -> list[Path]:
     path = Path(file_path)
     if path.is_file():
         return [path]
-    return sorted(p for p in path.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES | {".pdf"})
+    if not path.is_dir():
+        return []
+    return sorted(p for p in path.iterdir() if p.suffix.lower() in FLYER_SUFFIXES)
+
+
+def delete_flyer_files(conn: sqlite3.Connection, source) -> None:
+    """Remove a flyer's stored files, but only from inside the app's upload folder."""
+    if not source["file_path"]:
+        return
+    folder = Path(source["file_path"]).resolve()
+    root = upload_dir(conn).resolve()
+    if folder.is_dir() and folder.is_relative_to(root) and folder != root:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def _offers_from_page(data: dict, page: int, include_non_food: bool) -> list[RawOffer]:
@@ -187,12 +269,16 @@ def process_flyer(
     ).fetchone()
     if src is None:
         raise KeyError(source_id)
-    conn.execute("UPDATE sources SET status = 'processing', error = NULL, pages_done = 0 WHERE id = ?", (source_id,))
+    conn.execute(
+        "UPDATE sources SET status = 'processing', collecting = 0, error = NULL, pages_done = 0 WHERE id = ?", (source_id,)
+    )
     conn.execute("DELETE FROM observations WHERE source_id = ?", (source_id,))
     conn.commit()
 
     try:
-        pages = load_pages(_source_files(src["file_path"]))
+        pages = load_pages(source_files(src["file_path"]))
+        if not pages:
+            raise ValueError("This flyer has no pages yet")
         conn.execute("UPDATE sources SET pages_total = ? WHERE id = ?", (len(pages), source_id))
         conn.commit()
         extractor = extractor or ClaudeExtractor(include_non_food=include_non_food)

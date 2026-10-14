@@ -13,10 +13,13 @@ _CONTENT_TYPES = {"application/pdf": ".pdf", "image/jpeg": ".jpg", "image/png": 
 
 
 def download(url: str, dest_dir: Path | None = None, *, client=None) -> Path:
+    from ..capture import assert_public_url
+
+    assert_public_url(url)  # never fetch from this machine or the local network
     dest_dir = dest_dir or Path(tempfile.mkdtemp(prefix="flyer-"))
     dest_dir.mkdir(parents=True, exist_ok=True)
     own_client = client is None
-    client = client or http_client()
+    client = client or http_client(event_hooks={"request": [lambda request: assert_public_url(str(request.url))]})
     try:
         response = get_with_retry(client, url)
     finally:

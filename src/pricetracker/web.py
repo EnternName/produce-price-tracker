@@ -12,20 +12,22 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import db, flyers, queries
+from . import api, db, flyers, queries
 from .catalog import CATEGORIES
 from .importers import CSV_TEMPLATE, add_manual, import_csv
 from .pricing import reassign_product
+from .security import LocalAppGuard, load_token
 from .textnorm import fold
 
 log = logging.getLogger(__name__)
 HERE = Path(__file__).parent
 MAX_SERIES = 8  # categorical colour slots; further stores are drawn in a neutral "other" colour
 
+EXTENSION_DIR = HERE / "browser_extension"
 
 
 @asynccontextmanager
@@ -33,13 +35,17 @@ async def lifespan(app: FastAPI):
     conn = db.connect(app.state.db_path)
     db.init_db(conn)
     conn.close()
+    app.state.token = load_token(Path(app.state.db_path).parent)
     yield
 
 
 app = FastAPI(title="Price tracker", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
+app.include_router(api.router)
+app.add_middleware(LocalAppGuard, token_provider=lambda: app.state.token)
 templates = Jinja2Templates(directory=HERE / "templates")
 app.state.db_path = db.DEFAULT_DB_PATH
+app.state.token = None
 
 
 def _eur(value) -> str:
@@ -295,8 +301,9 @@ def source_detail(request: Request, conn: Conn, source_id: int, review: int = 0)
     total = conn.execute(
         f"SELECT COUNT(*) FROM observations WHERE source_id = ? {'AND needs_review' if review else ''}", (source_id,)
     ).fetchone()[0]
+    files_count = len(flyers.source_files(source["file_path"])) if source["file_path"] else 0
     return render(request, "source.html", source=source, rows=rows, total=total, review=review,
-                  products=_product_options(conn))
+                  files_count=files_count, products=_product_options(conn))
 
 
 @app.post("/sources/{source_id}/reprocess")
@@ -312,10 +319,27 @@ def reprocess(background: BackgroundTasks, conn: Conn, source_id: int):
 
 @app.post("/sources/{source_id}/delete")
 def delete_source(conn: Conn, source_id: int):
+    source = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+    if source is None:
+        raise HTTPException(404)
+    flyers.delete_flyer_files(conn, source)
     conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
     conn.commit()
-    shutil.rmtree(flyers.UPLOAD_DIR / str(source_id), ignore_errors=True)
     return RedirectResponse("/flyers", status_code=303)
+
+
+@app.post("/sources/{source_id}/finish")
+def finish_draft(background: BackgroundTasks, conn: Conn, source_id: int):
+    """Read a flyer the browser add-on was still adding pages to."""
+    source = conn.execute("SELECT * FROM sources WHERE id = ? AND kind = 'flyer'", (source_id,)).fetchone()
+    if source is None:
+        raise HTTPException(404)
+    if not flyers.source_files(source["file_path"] or ""):
+        raise HTTPException(400, "This flyer has no pages yet")
+    conn.execute("UPDATE sources SET collecting = 0 WHERE id = ?", (source_id,))
+    conn.commit()
+    background.add_task(_process_in_background, source_id, False)
+    return RedirectResponse(f"/sources/{source_id}", status_code=303)
 
 
 # --- review ----------------------------------------------------------------------------------------
@@ -368,6 +392,29 @@ def delete_observation(conn: Conn, obs_id: int, back: Annotated[str, Form()] = "
 def _local(path: str) -> str:
     """Only redirect within this app."""
     return path if path.startswith("/") and not path.startswith("//") else "/review"
+
+
+# --- browser add-on --------------------------------------------------------------------------------
+
+
+@app.get("/extension", response_class=HTMLResponse)
+def extension_page(request: Request):
+    return render(request, "extension.html", token=request.app.state.token, app_url=str(request.base_url).rstrip("/"))
+
+
+@app.get("/extension/pricetracker-addon.zip")
+def extension_zip():
+    """The add-on folder as a zip, ready for about:debugging or `web-ext sign`."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(EXTENSION_DIR.rglob("*")):
+            if path.is_file() and "__pycache__" not in path.parts:
+                zf.write(path, path.relative_to(EXTENSION_DIR).as_posix())
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": "attachment; filename=pricetracker-addon.zip"})
 
 
 # --- import ----------------------------------------------------------------------------------------
