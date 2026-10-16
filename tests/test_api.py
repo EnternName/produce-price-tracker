@@ -33,6 +33,14 @@ def png(width, height, text="page", color="white", scale_to=None, seed=0):
     return buf.getvalue()
 
 
+def pdf_bytes(text="folleto"):
+    img = Image.new("RGB", (600, 800), "white")
+    ImageDraw.Draw(img).text((40, 40), text, fill="black")
+    buf = io.BytesIO()
+    img.save(buf, format="PDF")
+    return buf.getvalue()
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(web.app.state, "db_path", tmp_path / "web.db")
@@ -157,15 +165,15 @@ def test_finish_draft_from_web_ui(client):
 
 
 def test_urls_endpoint(client, monkeypatch):
-    pages = {"https://cdn.example/p1.jpg": png(1000, 1400, "one"), "https://cdn.example/p2.jpg": png(1000, 1400, "two", "#ffe")}
+    pages = {"https://cdn.example/p1.jpg": png(1000, 1400, "one", seed=1), "https://cdn.example/p2.jpg": png(1000, 1400, "two", "#ffe", seed=2)}
     captured = {}
 
-    def fake_collect(urls, **kwargs):
+    def fake_download_all(urls, **kwargs):
         captured.update(kwargs, urls=urls)
-        return capture.CaptureResult(files=[capture.inspect(u, pages[u]) for u in urls if u in pages],
-                                     skipped=[{"url": u, "reason": "404"} for u in urls if u not in pages])
+        return ([capture.inspect(u, pages[u]) for u in urls if u in pages],
+                [{"url": u, "reason": "404"} for u in urls if u not in pages])
 
-    monkeypatch.setattr(capture, "collect", fake_collect)
+    monkeypatch.setattr(capture, "download_all", fake_download_all)
     draft = client.post("/api/flyers", json={"store": "Lidl"}, headers=client.ext_headers).json()
     r = client.post(f"/api/flyers/{draft['id']}/urls", headers=client.ext_headers,
                     json={"urls": [*pages, "https://cdn.example/missing.jpg"], "page_url": "https://www.lidl.es/folleto", "user_agent": "Firefox"})
@@ -203,22 +211,24 @@ def test_collect_filters_and_dedupes(monkeypatch):
     monkeypatch.setenv("PRICETRACKER_ALLOW_PRIVATE_URLS", "1")
     big = png(1200, 1600, "page one", seed=1)
     routes = {
-        "https://cdn.example/page1-small.jpg": (png(1200, 1600, "page one", seed=1, scale_to=(600, 800)), "image/png"),  # same page, lower res
-        "https://cdn.example/page1.jpg": (big, "image/png"),
-        "https://cdn.example/page2.jpg": (png(1200, 1600, "page two", seed=2), "image/png"),  # same layout, other products
+        "https://cdn.example/w_600/page1.jpg": (png(1200, 1600, "page one", seed=1, scale_to=(600, 800)), "image/png"),  # same page, lower res
+        "https://cdn.example/w_1600/page1.jpg": (big, "image/png"),
+        "https://cdn.example/w_1600/page2.jpg": (png(1200, 1600, "page two", seed=2), "image/png"),  # same layout, other products
         "https://cdn.example/logo.png": (png(120, 60), "image/png"),
-        "https://cdn.example/flyer.pdf": (b"%PDF-1.7 fake", "application/pdf"),
+        "https://cdn.example/flyer.pdf": (pdf_bytes(), "application/pdf"),
+        "https://cdn.example/broken.pdf": (b"%PDF-1.7 not really", "application/pdf"),
         "https://cdn.example/app.js": (b"console.log(1)", "text/javascript"),
     }
     result = capture.collect(list(routes) + ["https://cdn.example/gone.jpg"], client=_mock_client(routes))
     kept = [f.url for f in result.files]
-    assert "https://cdn.example/page1.jpg" in kept and "https://cdn.example/page1-small.jpg" not in kept
-    assert "https://cdn.example/page2.jpg" in kept and "https://cdn.example/flyer.pdf" in kept
+    assert "https://cdn.example/w_1600/page1.jpg" in kept and "https://cdn.example/w_600/page1.jpg" not in kept
+    assert "https://cdn.example/w_1600/page2.jpg" in kept and "https://cdn.example/flyer.pdf" in kept
     reasons = {s["url"]: s["reason"] for s in result.skipped}
     assert "too small" in reasons["https://cdn.example/logo.png"]
     assert "not a PDF" in reasons["https://cdn.example/app.js"]
     assert "404" in reasons["https://cdn.example/gone.jpg"]
-    assert "https://cdn.example/page1-small.jpg" in reasons
+    assert "not a readable PDF" in reasons["https://cdn.example/broken.pdf"]
+    assert "https://cdn.example/w_600/page1.jpg" in reasons
 
 
 def test_private_urls_are_blocked(monkeypatch):
@@ -268,8 +278,8 @@ def test_pdf_link_in_viewer_json(monkeypatch):
     viewer = b'{"flyer": {"name": "Folleto", "hiResPdfUrl": "https://assets.example/hi.pdf", "pdfUrl": "https://assets.example/f.pdf"}}'
     routes = {
         "https://endpoints.example/v4/flyer?flyer_identifier=x": (viewer, "application/json"),
-        "https://assets.example/f.pdf": (b"%PDF-1.7 regular", "application/pdf"),
-        "https://assets.example/hi.pdf": (b"%PDF-1.7 huge", "application/pdf"),
+        "https://assets.example/f.pdf": (pdf_bytes("regular"), "application/pdf"),
+        "https://assets.example/hi.pdf": (pdf_bytes("huge"), "application/pdf"),
     }
     result = capture.collect(["https://endpoints.example/v4/flyer?flyer_identifier=x"], client=_mock_client(routes))
     assert [f.url for f in result.files] == ["https://assets.example/f.pdf"]

@@ -1,7 +1,12 @@
 // Popup: find the flyer on the current tab and send it to the local Price tracker app.
 const ext = globalThis.browser ?? globalThis.chrome;
 const DEFAULTS = { appUrl: "http://127.0.0.1:8000", token: "" };
-const MAX_CAPTURE_HEIGHT = 12000; // px per full-page screenshot slice
+const SLICE_HEIGHT = 4000; // px per whole-page screenshot slice (each is uploaded on its own)
+const JPEG_QUALITY = 90;
+const MAX_URL = 4000;
+const QUICK_TIMEOUT = 8000; // ms, for status checks
+const SEND_TIMEOUT = 300000; // ms: the app may be downloading a 40 MB PDF
+const isFirefox = typeof ext.tabs.captureTab === "function"; // captureTab is Firefox-only
 const $ = (id) => document.getElementById(id);
 
 let tab = null;
@@ -21,7 +26,7 @@ async function getSettings() {
   return { ...DEFAULTS, ...stored };
 }
 
-async function call(path, { method = "GET", json, form } = {}) {
+async function call(path, { method = "GET", json, form, timeout = 60000 } = {}) {
   const { appUrl, token } = await getSettings();
   const headers = { "X-Pricetracker-Token": token || "" };
   let body;
@@ -33,9 +38,13 @@ async function call(path, { method = "GET", json, form } = {}) {
   }
   let response;
   try {
-    response = await fetch(appUrl.replace(/\/+$/, "") + path, { method, headers, body });
+    response = await fetch(appUrl.replace(/\/+$/, "") + path, { method, headers, body, signal: AbortSignal.timeout(timeout) });
   } catch (e) {
-    throw new AppError("unreachable", `Can't reach the app at ${appUrl}. Is “pricetracker serve” running?`);
+    if (e.name === "TimeoutError") throw new AppError("timeout", "The app took too long to answer. Check the Flyers page in the app.");
+    throw new AppError(
+      "unreachable",
+      `Can't reach the app at ${appUrl}. Is “pricetracker serve” running? (Use http://127.0.0.1:PORT or http://localhost:PORT.)`,
+    );
   }
   const data = await response.json().catch(() => ({}));
   if (response.status === 401) throw new AppError("token", "The app needs the token: copy it from the app's “Browser add-on” page into Settings below.");
@@ -111,48 +120,58 @@ function renderDraft(draft) {
   $("draft-store").textContent = draft.store;
 }
 
-async function createFlyer() {
+function pageInfo() {
+  return {
+    page_url: (tab.url || "").slice(0, 2000),
+    user_agent: scan ? scan.userAgent : navigator.userAgent,
+  };
+}
+
+function chosenStore() {
   const store = $("store").value.trim();
   if (!store) {
     $("store").focus();
     throw new AppError("input", "Choose the store first.");
   }
-  const created = await call("/api/flyers", {
-    method: "POST",
-    json: { store, title: $("title").value.trim() || null, page_url: tab.url },
-  });
-  return { id: created.id, store: created.store, files: created.files, url: created.url };
+  return store;
 }
 
 async function ensureDraft() {
   const existing = await currentDraft();
   if (existing) return existing;
-  const draft = await createFlyer();
+  const created = await call("/api/flyers", {
+    method: "POST",
+    timeout: QUICK_TIMEOUT,
+    json: { store: chosenStore(), title: $("title").value.trim() || null, page_url: pageInfo().page_url },
+  });
+  const draft = { id: created.id, store: created.store, files: created.files, url: created.url };
   await saveDraft(draft);
   return draft;
 }
 
-async function sendCompleteFile(url) {
-  // A PDF (or a single file) is a whole flyer: send it on its own, leaving any draft untouched.
-  const flyer = await createFlyer();
-  const result = await call(`/api/flyers/${flyer.id}/urls`, {
+function draftNote(draft) {
+  // Pages always go to the flyer in progress, whose store was set when it was started.
+  const store = $("store").value.trim();
+  return store && store !== draft.store ? ` (added to the ${draft.store} flyer in progress)` : "";
+}
+
+async function sendInOneGo(content) {
+  // A PDF, a single file or a page's text is a whole flyer: one request creates it and starts the
+  // reading, so closing the popup meanwhile can't leave half a flyer behind. Any draft is untouched.
+  const done = await call("/api/flyers/send", {
     method: "POST",
-    json: { urls: [url], page_url: tab.url, user_agent: scan ? scan.userAgent : navigator.userAgent },
+    timeout: SEND_TIMEOUT,
+    json: { store: chosenStore(), title: $("title").value.trim() || null, ...pageInfo(), ...content },
   });
-  if (!result.added) {
-    await call(`/api/flyers/${flyer.id}`, { method: "DELETE" }).catch(() => {});
-    const why = result.skipped.length ? result.skipped[0].reason : "nothing usable";
-    throw new AppError("http", `The app could not use that file (${why}). Try a screenshot instead.`);
-  }
-  const done = await call(`/api/flyers/${flyer.id}/finish`, { method: "POST" });
-  showResult(`Sent. Claude is reading the flyer now; prices appear in the app in a minute or two.`, { link: done.url });
+  const parts = done.chunks > 1 ? ` (${done.chunks} parts)` : "";
+  showResult(`Sent${parts}. Claude is reading it now; prices appear in the app in a minute or two.`, { link: done.url });
 }
 
 async function refreshDraft() {
   const draft = await currentDraft();
   if (!draft) return renderDraft(null);
   try {
-    const status = await call(`/api/flyers/${draft.id}`);
+    const status = await call(`/api/flyers/${draft.id}`, { timeout: QUICK_TIMEOUT });
     if (!status.collecting) return saveDraft(null); // finished or read from the app meanwhile
     await saveDraft({ ...draft, files: status.files });
   } catch (e) {
@@ -164,7 +183,16 @@ async function refreshDraft() {
 async function finishDraft() {
   const draft = await currentDraft();
   if (!draft) return;
-  const done = await call(`/api/flyers/${draft.id}/finish`, { method: "POST" });
+  let done;
+  try {
+    done = await call(`/api/flyers/${draft.id}/finish`, { method: "POST" });
+  } catch (e) {
+    if (e.kind === "http" && /already sent|no longer accepting|No such flyer/.test(e.message)) {
+      await saveDraft(null); // it was read from the app meanwhile
+      return showResult("This flyer was already sent from the app.", { link: draft.url });
+    }
+    throw e;
+  }
   await saveDraft(null);
   showResult(`Sent ${done.files} file(s). Claude is reading the flyer now; prices appear in the app in a minute or two.`, { link: done.url });
 }
@@ -175,52 +203,72 @@ async function addImageUrls(urls) {
   const draft = await ensureDraft();
   const result = await call(`/api/flyers/${draft.id}/urls`, {
     method: "POST",
-    json: { urls, page_url: tab.url, user_agent: scan ? scan.userAgent : navigator.userAgent },
+    timeout: SEND_TIMEOUT,
+    json: { urls: urls.filter((u) => u.length <= MAX_URL), ...pageInfo() },
   });
   await saveDraft({ ...draft, files: result.files });
-  if (!result.added) {
+  if (!result.added && !result.replaced) {
     const why = result.skipped.length ? result.skipped[0].reason : "nothing usable";
     throw new AppError("http", `Nothing could be added (${why}). Try a screenshot instead.`);
   }
+  const sharper = result.replaced ? ` Replaced ${result.replaced} with a sharper copy.` : "";
   const skipped = result.skipped_count ? ` Skipped ${result.skipped_count} (small, duplicate or unreadable).` : "";
-  showResult(`Added ${result.added} page image(s).${skipped} Add more pages, or press “Read now”.`);
+  showResult(`Added ${result.added} page image(s)${draftNote(draft)}.${sharper}${skipped} Add more pages, or press “Read now”.`);
 }
 
-async function sendPageText() {
-  const flyer = await createFlyer();
-  const result = await call(`/api/flyers/${flyer.id}/text`, { method: "POST", json: { text: scan.text, page_url: tab.url } });
-  const done = await call(`/api/flyers/${flyer.id}/finish`, { method: "POST" });
-  const parts = result.chunks > 1 ? ` in ${result.chunks} parts` : "";
-  showResult(`Sent the page text${parts}. Claude is reading the offers now.`, { link: done.url });
-}
-
-async function dataUrlToBlob(dataUrl) {
-  return (await fetch(dataUrl)).blob();
+function dataUrlToBlob(dataUrl) {
+  const [head, data] = dataUrl.split(",", 2);
+  const mime = (head.match(/data:([^;]+)/) || [])[1] || "image/png";
+  const bytes = atob(data);
+  const buffer = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) buffer[i] = bytes.charCodeAt(i);
+  return new Blob([buffer], { type: mime });
 }
 
 async function addScreenshots(dataUrls) {
-  const draft = await ensureDraft();
-  const form = new FormData();
-  let n = draft.files;
+  // One upload per screenshot, so one oversized slice can't lose the others.
+  let draft = await ensureDraft();
+  let added = 0;
   for (const dataUrl of dataUrls) {
-    form.append("files", await dataUrlToBlob(dataUrl), `screenshot-${String(++n).padStart(3, "0")}.png`);
+    const form = new FormData();
+    form.append("files", dataUrlToBlob(dataUrl), `screenshot-${String(draft.files + 1).padStart(3, "0")}.jpg`);
+    const status = await call(`/api/flyers/${draft.id}/pages`, { method: "POST", form, timeout: SEND_TIMEOUT });
+    draft = { ...draft, files: status.files };
+    await saveDraft(draft);
+    added++;
   }
-  const status = await call(`/api/flyers/${draft.id}/pages`, { method: "POST", form });
-  await saveDraft({ ...draft, files: status.files });
-  showResult(`Added ${dataUrls.length} screenshot(s) (${status.files} in total). Show the next page and add it, or press “Read now”.`);
+  showResult(`Added ${added} screenshot(s)${draftNote(draft)}, ${draft.files} file(s) in total. Show the next page and add it, or press “Read now”.`);
 }
 
 async function captureVisible() {
-  return [await ext.tabs.captureVisibleTab(tab.windowId, { format: "png" })];
+  return [await ext.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: JPEG_QUALITY })];
+}
+
+async function imageHeight(dataUrl) {
+  const img = new Image();
+  img.src = dataUrl;
+  await img.decode();
+  return img.naturalHeight;
 }
 
 async function captureFullPage() {
-  // Firefox only: tabs.captureTab with a rect can capture beyond the visible area.
+  // Firefox accepts a `rect` beyond the visible area. captureVisibleTab works with the permission the
+  // toolbar click grants; captureTab would need access to all sites, so it is only a fallback.
   const { width, height } = scan.page;
   const shots = [];
-  for (let y = 0; y < height; y += MAX_CAPTURE_HEIGHT) {
-    const rect = { x: 0, y, width, height: Math.min(MAX_CAPTURE_HEIGHT, height - y) };
-    shots.push(await ext.tabs.captureTab(tab.id, { format: "png", rect, scale: 1 }));
+  for (let y = 0; y < height; y += SLICE_HEIGHT) {
+    const rect = { x: 0, y, width, height: Math.min(SLICE_HEIGHT, height - y) };
+    const options = { format: "jpeg", quality: JPEG_QUALITY, rect, scale: 1 };
+    let shot = await ext.tabs.captureVisibleTab(tab.windowId, options);
+    if ((await imageHeight(shot)) < rect.height * 0.9) {
+      try {
+        shot = await ext.tabs.captureTab(tab.id, options);
+      } catch (e) {
+        if (!shots.length) throw new AppError("input", "This Firefox could only capture the visible area: use “Add visible area” page by page.");
+        break;
+      }
+    }
+    shots.push(shot);
   }
   return shots;
 }
@@ -237,7 +285,7 @@ function renderScan() {
   if (scan.pdfs.length) parts.push(`${scan.pdfs.length} PDF${scan.pdfs.length > 1 ? "s" : ""}`);
   for (const pdf of scan.pdfs.slice(0, 8)) {
     const button = el("button", pdf.sure ? {} : { class: "secondary", title: "This looks like a download button; the app checks that it really is a PDF" }, "Send PDF");
-    button.addEventListener("click", () => busy(button, () => sendCompleteFile(pdf.url)));
+    button.addEventListener("click", () => busy(button, () => sendInOneGo({ urls: [pdf.url] })));
     pdfList.append(el("li", {}, el("span", { class: "label", title: pdf.url }, pdf.label), button));
   }
 
@@ -263,6 +311,9 @@ function renderScan() {
     $("text-summary").textContent = `${scan.priceCount} prices in ${scan.text.length.toLocaleString()} characters of text.`;
   }
 
+  $("shot-full").hidden = !(isFirefox && scan.page.height > 0);
+  $("scan-warning").hidden = !scan.timingBufferWasFull;
+
   $("scan-summary").textContent = parts.length
     ? `Found ${parts.join(" and ")}.`
     : scan.frames.length
@@ -281,7 +332,7 @@ async function targetTab() {
 
 async function loadStores() {
   try {
-    const stores = await call("/api/stores");
+    const stores = await call("/api/stores", { timeout: QUICK_TIMEOUT });
     $("store-list").replaceChildren(...stores.map((s) => el("option", { value: s.name })));
     setStatus("Connected", "ok");
     $("setup-hint").hidden = true;
@@ -302,25 +353,22 @@ async function main() {
 
   tab = await targetTab();
   $("title").value = (tab.title || "").slice(0, 120);
-  $("store").value = settings.draft ? settings.draft.store : guessStore(tab.url || "", tab.title || "");
-  $("shot-full").hidden = typeof ext.tabs.captureTab !== "function";
+  $("store").value = guessStore(tab.url || "", tab.title || "");
 
-  await loadStores();
-  refreshDraft().catch(() => {});
-
+  const scanning = ext.scripting.executeScript({ target: { tabId: tab.id }, func: scanFlyerPage });
+  loadStores().then(() => refreshDraft()).catch(() => {});
   try {
-    const [injected] = await ext.scripting.executeScript({ target: { tabId: tab.id }, func: scanFlyerPage });
+    const [injected] = await scanning;
     scan = injected.result;
     renderScan();
   } catch (e) {
     // Built-in PDF viewer, browser pages and other places where scripts can't run.
-    scan = { pdfs: [], images: [], frames: [], text: "", priceCount: 0, page: { width: 0, height: 0 }, userAgent: navigator.userAgent };
+    scan = { pdfs: [], images: [], frames: [], text: "", priceCount: 0, timingBufferWasFull: false, page: { width: 0, height: 0 }, userAgent: navigator.userAgent };
     const isHttp = /^https?:/i.test(tab.url || "");
     $("scan-summary").textContent = isHttp
       ? "Can't look inside this tab (it may be a PDF open in Firefox's viewer). You can send its address: the app downloads it."
       : "Open a store's flyer page, then click the add-on again.";
     $("send-tab-url").hidden = !isHttp;
-    $("shot-full").hidden = true;
   }
 }
 
@@ -334,8 +382,8 @@ $("save-settings").addEventListener("click", () =>
   }),
 );
 $("send-images").addEventListener("click", () => busy($("send-images"), () => addImageUrls(scan.images.map((i) => i.url))));
-$("send-tab-url").addEventListener("click", () => busy($("send-tab-url"), () => sendCompleteFile(tab.url)));
-$("send-text").addEventListener("click", () => busy($("send-text"), sendPageText));
+$("send-tab-url").addEventListener("click", () => busy($("send-tab-url"), () => sendInOneGo({ urls: [tab.url] })));
+$("send-text").addEventListener("click", () => busy($("send-text"), () => sendInOneGo({ text: scan.text })));
 $("shot-visible").addEventListener("click", () => busy($("shot-visible"), async () => addScreenshots(await captureVisible())));
 $("shot-full").addEventListener("click", () => busy($("shot-full"), async () => addScreenshots(await captureFullPage())));
 $("draft-finish").addEventListener("click", () => busy($("draft-finish"), finishDraft));
@@ -346,7 +394,7 @@ $("draft-open").addEventListener("click", async () => {
 $("draft-discard").addEventListener("click", () =>
   busy($("draft-discard"), async () => {
     const draft = await currentDraft();
-    if (draft) await call(`/api/flyers/${draft.id}`, { method: "DELETE" }).catch(() => {});
+    if (draft) await call(`/api/flyers/${draft.id}`, { method: "DELETE", timeout: QUICK_TIMEOUT }).catch(() => {});
     await saveDraft(null);
     showResult("Discarded.");
   }),

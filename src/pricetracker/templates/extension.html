@@ -8,7 +8,7 @@
   <div class="card">
     <h2 style="margin-top:0">1 · Install it</h2>
     <p><a class="button" style="padding:7px 12px;border-radius:8px;display:inline-block" href="/extension/pricetracker-addon.zip">Download the add-on (.zip)</a></p>
-    <p class="small"><b>Firefox:</b> unzip it, open <code>about:debugging#/runtime/this-firefox</code>, click <i>Load Temporary Add-on…</i> and pick
+    <p class="small"><b>Firefox (140 or newer):</b> unzip it, open <code>about:debugging#/runtime/this-firefox</code>, click <i>Load Temporary Add-on…</i> and pick
       <code>manifest.json</code> from the unzipped folder. Firefox removes temporary add-ons when it restarts. To keep it, see “Keep it installed” below.</p>
     <p class="small"><b>Chrome, Edge, Brave:</b> unzip it, open <code>chrome://extensions</code>, turn on <i>Developer mode</i>, click <i>Load unpacked</i> and pick the folder.</p>
     <p class="small">Then pin the € button to the toolbar.</p>
@@ -58,15 +58,15 @@
   <ol>
     <li>Create API credentials at <code>addons.mozilla.org/developers/addon/api/key/</code> (any Firefox account works).</li>
     <li>Run, in the unzipped add-on folder: <code>npx web-ext sign --channel=unlisted --api-key=… --api-secret=…</code></li>
-    <li>Open the signed <code>.xpi</code> it produces with Firefox.</li>
+    <li>Open the signed <code>.xpi</code> it produces with Firefox. Signing is automatic and usually takes minutes (up to a day if Mozilla picks it for a manual check).</li>
   </ol>
   <p>Firefox Developer Edition, Nightly and ESR can instead install it unsigned once <code>xpinstall.signatures.required</code> is set to <code>false</code> in <code>about:config</code>.</p>
 </div>
 
 <h2>What gets sent where</h2>
 <div class="card small">
-  <p>The add-on only talks to this app, at the address above. When you send something, the app downloads the PDF or images itself
-    (it refuses addresses inside your home network) and passes the pages, or the page text, to Claude to read the prices.
-    It never sends anything on its own: only when you click a button in its popup.</p>
+  <p>The add-on only talks to this app, at the address above (keep it <code>127.0.0.1</code> or <code>localhost</code>). When you send something, the app downloads the PDF or images itself
+    (only from public internet addresses, never from your home network) and passes the pages, or the page text, to Claude to read the prices.
+    That is why Firefox lists “website content” and “browsing activity” when you install it. It never sends anything on its own: only when you click a button in its popup.</p>
 </div>
 {% endblock %}

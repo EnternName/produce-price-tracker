@@ -13,10 +13,15 @@ or call its API. Two layers stop that:
 Both rely on the browser's notion of "same origin", which a DNS-rebinding attack subverts (a malicious
 domain that resolves to 127.0.0.1). So requests must also be addressed to an allowed host name:
 localhost, 127.0.0.1 or ::1, plus any listed in $PRICETRACKER_ALLOWED_HOSTS (comma-separated).
+
+Pages may not be shown inside another site's frame (clickjacking). And when the app is opened from
+another device (``serve --host 0.0.0.0``), every page asks for a password: the token.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hmac
 import json
 import os
@@ -56,6 +61,20 @@ def allowed_hosts() -> frozenset[str]:
     return LOCAL_HOSTS | extra
 
 
+LOCAL_CLIENTS = frozenset({"127.0.0.1", "::1", "localhost"})
+_PAGE_HEADERS = [
+    (b"x-frame-options", b"DENY"),
+    (b"content-security-policy", b"frame-ancestors 'none'"),
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"same-origin"),
+]
+
+
+def trusted_clients() -> frozenset[str]:
+    extra = {h.strip().lower() for h in os.environ.get("PRICETRACKER_TRUSTED_CLIENTS", "").split(",") if h.strip()}
+    return LOCAL_CLIENTS | extra
+
+
 def host_name(host_header: str) -> str:
     """'127.0.0.1:8000' -> '127.0.0.1', '[::1]:8000' -> '::1'."""
     host = host_header.strip().lower()
@@ -78,10 +97,11 @@ def is_extension_origin(origin: str | None) -> bool:
 class LocalAppGuard:
     """ASGI middleware enforcing the two rules above."""
 
-    def __init__(self, app, token_provider, hosts_provider=allowed_hosts):
+    def __init__(self, app, token_provider, hosts_provider=allowed_hosts, clients_provider=trusted_clients):
         self.app = app
         self.token_provider = token_provider  # callable -> current token
         self.hosts_provider = hosts_provider  # callable -> allowed Host names
+        self.clients_provider = clients_provider  # callable -> client addresses that need no password
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -96,9 +116,33 @@ class LocalAppGuard:
         if path.startswith("/api/"):
             return await self._api(scope, receive, send, method, headers, origin)
 
+        if not self._local_client(scope) and not self._password_ok(headers):
+            return await _respond(send, 401, {"detail": "Enter the app's token as the password"},
+                                  [(b"www-authenticate", b'Basic realm="Price tracker", charset="UTF-8"')])
         if method in _UNSAFE_METHODS and not self._same_origin(scope, headers):
-            return await _respond(send, 403, {"detail": "Cross-site request blocked"})
-        return await self.app(scope, receive, send)
+            return await _respond(send, 403, {"detail": "Cross-site request blocked"}, _PAGE_HEADERS)
+
+        async def send_with_page_headers(message):
+            if message["type"] == "http.response.start":
+                message = {**message, "headers": [*message.get("headers", []), *_PAGE_HEADERS]}
+            await send(message)
+
+        return await self.app(scope, receive, send_with_page_headers)
+
+    def _local_client(self, scope) -> bool:
+        client = scope.get("client")
+        return client is None or str(client[0]).lower() in self.clients_provider()
+
+    def _password_ok(self, headers) -> bool:
+        """HTTP Basic auth with any user name and the API token as password (for other devices)."""
+        auth = headers.get("authorization", "")
+        if not auth.lower().startswith("basic "):
+            return False
+        try:
+            _, _, password = base64.b64decode(auth[6:].strip()).decode("utf-8").partition(":")
+        except (binascii.Error, UnicodeDecodeError):
+            return False
+        return hmac.compare_digest(password.encode(), self.token_provider().encode())
 
     async def _api(self, scope, receive, send, method, headers, origin):
         cors = _cors_headers(origin) if is_extension_origin(origin) else []

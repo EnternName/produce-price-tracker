@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 import secrets
 import shutil
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
@@ -30,6 +33,7 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".avif", ".gif", ".bmp", ".t
 TEXT_SUFFIX = ".txt"  # visible text of a store web page listing offers (from the browser add-on)
 FLYER_SUFFIXES = IMAGE_SUFFIXES | {".pdf", TEXT_SUFFIX}
 TEXT_CHUNK = 12000  # characters of page text per request
+TEXT_OVERLAP = 400  # characters repeated between consecutive text pieces
 
 
 def _jpeg(img: Image.Image) -> bytes:
@@ -90,23 +94,33 @@ def load_pages(paths: list[Path]) -> list[PageInput]:
         elif path.suffix.lower() == TEXT_SUFFIX:
             url, text = _read_page_text(path)
             for chunk in chunk_text(text):
-                pages.append(PageInput(len(pages) + 1, [], chunk, extra={"url": url}))
+                pages.append(PageInput(len(pages) + 1, [], chunk, extra={"url": url, "group": path.name}))
         else:
             raise ValueError(f"Unsupported file type: {path.name} (use PDF, PNG, JPEG or WebP)")
     return pages
 
 
-def chunk_text(text: str, size: int = TEXT_CHUNK) -> list[str]:
-    """Split page text at line breaks into pieces of at most `size` characters."""
-    chunks, current, length = [], [], 0
+def chunk_text(text: str, size: int = TEXT_CHUNK, overlap: int = TEXT_OVERLAP) -> list[str]:
+    """Split page text at line breaks into pieces of at most `size` characters. Each piece repeats
+    the last ~`overlap` characters of the previous one, so a product listed over several lines (name,
+    size, price) is whole in at least one piece; offers repeated by the overlap are dropped later."""
+    lines = []
     for line in text.splitlines():
         line = line.strip()
-        for piece in (line[i : i + size] for i in range(0, len(line), size)):  # enormous lines are cut
-            if current and length + len(piece) + 1 > size:
-                chunks.append("\n".join(current))
-                current, length = [], 0
-            current.append(piece)
-            length += len(piece) + 1
+        lines += [line[i : i + size] for i in range(0, len(line), size)]  # enormous lines are cut
+    chunks, current, length = [], [], 0
+    for line in lines:
+        if current and length + len(line) + 1 > size:
+            chunks.append("\n".join(current))
+            carry, carried = [], 0
+            for previous in reversed(current):
+                if carried + len(previous) + 1 > overlap or carried + len(previous) + len(line) + 2 > size:
+                    break
+                carry.insert(0, previous)
+                carried += len(previous) + 1
+            current, length = carry, carried
+        current.append(line)
+        length += len(line) + 1
     if current:
         chunks.append("\n".join(current))
     return chunks
@@ -135,7 +149,15 @@ def upload_dir(conn: sqlite3.Connection) -> Path:
 
 
 def _safe_name(name: str) -> str:
-    return re.sub(r"[^\w.\-]+", "_", Path(name).name)[:100] or "page"
+    """A short file-system-safe name that keeps the extension."""
+    path = Path(Path(name).name)
+    suffix = path.suffix.lower()[:8]
+    stem = re.sub(r"[^\w.\-]+", "_", path.stem)[:80].strip("._") or "page"
+    return stem + suffix
+
+
+class UnsupportedFile(ValueError):
+    pass
 
 
 def create_flyer_source(
@@ -172,22 +194,80 @@ def create_flyer_source(
     return source_id
 
 
+_locks: dict[int, threading.Lock] = {}
+_locks_guard = threading.Lock()
+
+
+@contextmanager
+def flyer_lock(source_id: int):
+    """Serialize changes to one flyer (adding pages, finishing, discarding) within this process."""
+    with _locks_guard:
+        lock = _locks.setdefault(source_id, threading.Lock())
+    with lock:
+        yield
+
+
+def close_draft(conn: sqlite3.Connection, source_id: int) -> bool:
+    """Stop a draft from taking more pages. True only for the one caller that actually closed it."""
+    closed = conn.execute("UPDATE sources SET collecting = 0 WHERE id = ? AND collecting = 1", (source_id,)).rowcount
+    conn.commit()
+    return bool(closed)
+
+
 def add_flyer_files(conn: sqlite3.Connection, source_id: int, files: list[Path] = (), blobs: list[tuple[str, bytes]] = ()) -> int:
     """Append files (paths, or (name, bytes) pairs) to a flyer, after the pages it already has.
-    Returns the flyer's file count."""
+    Returns the paths written."""
     row = conn.execute("SELECT file_path FROM sources WHERE id = ?", (source_id,)).fetchone()
-    if row is None or not row["file_path"]:
+    if row is None or not row["file_path"] or not Path(row["file_path"]).is_dir():
         raise KeyError(source_id)
     folder = Path(row["file_path"])
-    folder.mkdir(parents=True, exist_ok=True)
-    index = len(source_files(str(folder)))
-    for f in files:
-        shutil.copy(f, folder / f"{index:04d}_{_safe_name(f.name)}")
+    names = [_safe_name(f.name) for f in files] + [_safe_name(name) for name, _ in blobs]
+    if bad := [n for n in names if Path(n).suffix not in FLYER_SUFFIXES]:
+        raise UnsupportedFile(f"{bad[0]}: send PDF, PNG, JPEG, WebP or AVIF files")
+    index = _next_index(folder)
+    written = []
+    for f, name in zip(files, names, strict=False):
+        written.append(folder / f"{index:04d}_{name}")
+        shutil.copy(f, written[-1])
         index += 1
-    for name, data in blobs:
-        (folder / f"{index:04d}_{_safe_name(name)}").write_bytes(data)
+    for (_, data), name in zip(blobs, names[len(files):], strict=True):
+        written.append(folder / f"{index:04d}_{name}")
+        written[-1].write_bytes(data)
         index += 1
-    return index
+    return written
+
+
+ORIGINS_FILE = "origins.json"  # page file name -> URL it was downloaded from
+
+
+def page_origins(folder: Path) -> dict[str, str]:
+    try:
+        return json.loads((folder / ORIGINS_FILE).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def record_origins(folder: Path, origins: dict[str, str]) -> None:
+    current = page_origins(folder)
+    current.update(origins)
+    (folder / ORIGINS_FILE).write_text(json.dumps(current, indent=1))
+
+
+def _next_index(folder: Path) -> int:
+    """One past the highest page number used in `folder` (counting replaced and odd files too)."""
+    numbers = [int(p.name[:4]) for p in folder.iterdir() if p.name[:4].isdigit()]
+    return max(numbers, default=-1) + 1
+
+
+def replace_flyer_file(path: Path, name: str, data: bytes) -> Path:
+    """Swap a saved page for a better copy, keeping its position in the flyer."""
+    new_path = path.with_name(f"{path.name[:4]}_{_safe_name(name)}")
+    if new_path.suffix not in FLYER_SUFFIXES:
+        raise UnsupportedFile(name)
+    new_path.write_bytes(data)
+    if new_path != path:
+        path.unlink(missing_ok=True)
+    return new_path
 
 
 def source_files(file_path: str) -> list[Path]:
@@ -209,8 +289,9 @@ def delete_flyer_files(conn: sqlite3.Connection, source) -> None:
         shutil.rmtree(folder, ignore_errors=True)
 
 
-def _offers_from_page(data: dict, page: int, include_non_food: bool) -> list[RawOffer]:
-    offers, seen = [], set()
+def _offers_from_page(data: dict, page: int, include_non_food: bool, seen: set | None = None) -> list[RawOffer]:
+    offers = []
+    seen = set() if seen is None else seen
     for item in data.get("items", []):
         if not include_non_food and not item.get("is_food", True):
             continue
@@ -218,7 +299,7 @@ def _offers_from_page(data: dict, page: int, include_non_food: bool) -> list[Raw
         if price is None or price <= 0:
             continue
         key = (fold(item.get("name_printed") or ""), round(price, 2), fold(item.get("quantity_text") or ""))
-        if key in seen:  # overlapping slices can repeat an offer
+        if key in seen:  # overlapping image slices or text pieces can repeat an offer
             continue
         seen.add(key)
         base = RawOffer(
@@ -254,6 +335,20 @@ def _offers_from_page(data: dict, page: int, include_non_food: bool) -> list[Raw
     return offers
 
 
+class AlreadyProcessing(RuntimeError):
+    pass
+
+
+def reset_interrupted(conn: sqlite3.Connection) -> int:
+    """Flyers left 'processing' when the app stopped can be read again (call at startup)."""
+    n = conn.execute(
+        "UPDATE sources SET status = 'error', error = 'Interrupted: the app stopped while reading this flyer' "
+        "WHERE status = 'processing'"
+    ).rowcount
+    conn.commit()
+    return n
+
+
 def process_flyer(
     conn: sqlite3.Connection,
     source_id: int,
@@ -269,9 +364,14 @@ def process_flyer(
     ).fetchone()
     if src is None:
         raise KeyError(source_id)
-    conn.execute(
-        "UPDATE sources SET status = 'processing', collecting = 0, error = NULL, pages_done = 0 WHERE id = ?", (source_id,)
-    )
+    claimed = conn.execute(
+        """UPDATE sources SET status = 'processing', collecting = 0, error = NULL, pages_done = 0
+           WHERE id = ? AND status != 'processing'""",
+        (source_id,),
+    ).rowcount
+    conn.commit()
+    if not claimed:
+        raise AlreadyProcessing(f"flyer {source_id} is already being read")
     conn.execute("DELETE FROM observations WHERE source_id = ?", (source_id,))
     conn.commit()
 
@@ -294,6 +394,7 @@ def process_flyer(
     languages: dict[str, int] = {}
     valid_from, valid_to = src["valid_from"], src["valid_to"]
     errors: list[str] = []
+    seen_by_group: dict[str, set] = {}
 
     def run(page: PageInput):
         return page, extractor.extract(page, store_name=src["store_name"], total_pages=len(pages), today=today)
@@ -314,7 +415,9 @@ def process_flyer(
             languages[data.get("language", "other")] = languages.get(data.get("language", "other"), 0) + 1
             valid_from = valid_from or data.get("valid_from")
             valid_to = valid_to or data.get("valid_to")
-            for offer in _offers_from_page(data, page.number, include_non_food):
+            group = page.extra.get("group")
+            seen = seen_by_group.setdefault(group, set()) if group else None
+            for offer in _offers_from_page(data, page.number, include_non_food, seen):
                 offer.valid_from = offer.valid_from or valid_from
                 offer.valid_to = offer.valid_to or valid_to
                 row = build_observation(

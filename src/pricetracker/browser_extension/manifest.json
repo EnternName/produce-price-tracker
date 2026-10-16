@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Price tracker – send flyers",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Send the supermarket flyer you are viewing (PDF, page images or screenshots) to your own Price tracker app running on this computer.",
   "icons": {
     "48": "icons/icon-48.png",
@@ -32,7 +32,8 @@
       "strict_min_version": "140.0",
       "data_collection_permissions": {
         "required": [
-          "none"
+          "websiteContent",
+          "browsingActivity"
         ]
       }
     },

@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -34,12 +35,24 @@ EXTENSION_DIR = HERE / "browser_extension"
 async def lifespan(app: FastAPI):
     conn = db.connect(app.state.db_path)
     db.init_db(conn)
+    if n := flyers.reset_interrupted(conn):
+        log.warning("%s flyer(s) were interrupted while being read; use 'Read again'", n)
     conn.close()
     app.state.token = load_token(Path(app.state.db_path).parent)
     yield
 
 
 app = FastAPI(title="Price tracker", lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(request: Request, exc: RequestValidationError):
+    """Say what is wrong without echoing the input back (it may not even be encodable)."""
+    problems = "; ".join(
+        f"{'.'.join(str(p) for p in e.get('loc', ()) if p != 'body') or 'request'}: {e.get('msg', 'invalid')}"
+        for e in exc.errors()
+    )
+    return JSONResponse({"detail": problems or "invalid request"}, status_code=422)
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 app.include_router(api.router)
 app.add_middleware(LocalAppGuard, token_provider=lambda: app.state.token)
@@ -180,6 +193,8 @@ def _process_in_background(source_id: int, include_non_food: bool) -> None:
     conn = db.connect(app.state.db_path)
     try:
         flyers.process_flyer(conn, source_id, include_non_food=include_non_food)
+    except flyers.AlreadyProcessing:
+        log.info("flyer %s is already being read", source_id)
     except Exception:  # status/error are stored on the source row
         log.exception("flyer %s failed", source_id)
     finally:
@@ -219,10 +234,13 @@ async def upload_flyer(
             paths.append(path)
         if not paths:
             raise HTTPException(400, "No files uploaded")
-        source_id = flyers.create_flyer_source(
-            conn, store=store, files=paths, title=title or None, observed_on=observed_on or None,
-            valid_from=valid_from or None, valid_to=valid_to or None,
-        )
+        try:
+            source_id = flyers.create_flyer_source(
+                conn, store=store, files=paths, title=title or None, observed_on=observed_on or None,
+                valid_from=valid_from or None, valid_to=valid_to or None,
+            )
+        except (flyers.UnsupportedFile, ValueError) as e:
+            raise HTTPException(400, str(e)) from e
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     background.add_task(_process_in_background, source_id, include_non_food)
@@ -311,9 +329,13 @@ def reprocess(background: BackgroundTasks, conn: Conn, source_id: int):
     source = conn.execute("SELECT kind FROM sources WHERE id = ?", (source_id,)).fetchone()
     if source is None or source["kind"] != "flyer":
         raise HTTPException(400, "Only flyers can be re-read")
-    conn.execute("UPDATE sources SET status = 'pending' WHERE id = ?", (source_id,))
+    queued = conn.execute(
+        "UPDATE sources SET status = 'pending' WHERE id = ? AND status NOT IN ('pending', 'processing') AND collecting = 0",
+        (source_id,),
+    ).rowcount
     conn.commit()
-    background.add_task(_process_in_background, source_id, False)
+    if queued:  # a double click, or a stale page, must not start a second reading
+        background.add_task(_process_in_background, source_id, False)
     return RedirectResponse(f"/sources/{source_id}", status_code=303)
 
 
@@ -331,14 +353,15 @@ def delete_source(conn: Conn, source_id: int):
 @app.post("/sources/{source_id}/finish")
 def finish_draft(background: BackgroundTasks, conn: Conn, source_id: int):
     """Read a flyer the browser add-on was still adding pages to."""
-    source = conn.execute("SELECT * FROM sources WHERE id = ? AND kind = 'flyer'", (source_id,)).fetchone()
-    if source is None:
-        raise HTTPException(404)
-    if not flyers.source_files(source["file_path"] or ""):
-        raise HTTPException(400, "This flyer has no pages yet")
-    conn.execute("UPDATE sources SET collecting = 0 WHERE id = ?", (source_id,))
-    conn.commit()
-    background.add_task(_process_in_background, source_id, False)
+    with flyers.flyer_lock(source_id):
+        source = conn.execute("SELECT * FROM sources WHERE id = ? AND kind = 'flyer'", (source_id,)).fetchone()
+        if source is None:
+            raise HTTPException(404)
+        if not flyers.source_files(source["file_path"] or ""):
+            raise HTTPException(400, "This flyer has no pages yet")
+        # A stale "Read now" button (the add-on already sent it) must not start a second reading.
+        if flyers.close_draft(conn, source_id):
+            background.add_task(_process_in_background, source_id, False)
     return RedirectResponse(f"/sources/{source_id}", status_code=303)
 
 

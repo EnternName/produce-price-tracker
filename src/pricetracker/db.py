@@ -158,6 +158,8 @@ def load_matcher(conn: sqlite3.Connection) -> Matcher:
 def store_id(conn: sqlite3.Connection, slug_or_name: str) -> int:
     """Look a store up by slug or name, creating it if it is new."""
     key = slug_or_name.strip()
+    if not key:
+        raise ValueError("a store name is required")
     row = conn.execute(
         "SELECT id FROM stores WHERE slug = lower(?) OR lower(name) = lower(?)", (key, key)
     ).fetchone()

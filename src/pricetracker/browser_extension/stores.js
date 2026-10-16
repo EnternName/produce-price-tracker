@@ -46,7 +46,13 @@ function guessStore(url, title) {
   for (const [domain, name] of STORE_HOSTS) {
     if (host === domain || host.endsWith("." + domain)) return name;
   }
-  const text = `${title || ""} ${decodeURIComponent(new URL(url).pathname).replace(/[-_/]+/g, " ")}`;
+  let path = new URL(url).pathname;
+  try {
+    path = decodeURIComponent(path);
+  } catch (e) {
+    /* malformed %-escape: use the path as it is */
+  }
+  const text = `${title || ""} ${path.replace(/[-_/]+/g, " ")}`;
   for (const [pattern, name] of STORE_WORDS) {
     if (pattern.test(text)) return name;
   }

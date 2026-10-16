@@ -79,7 +79,8 @@ def test_lidl_find_leaflets():
     assert leaflets[0].valid_from == "2026-10-13" and leaflets[0].valid_to == "2026-10-19"
 
 
-def test_download(tmp_path):
+def test_download(tmp_path, monkeypatch):
+    monkeypatch.setenv("PRICETRACKER_ALLOW_PRIVATE_URLS", "1")  # no DNS in tests
     client = httpx.Client(transport=httpx.MockTransport(
         lambda r: httpx.Response(200, content=b"%PDF-1.4", headers={"content-type": "application/pdf"})))
     path = download.download("https://example.com/folleto?id=3", tmp_path, client=client)

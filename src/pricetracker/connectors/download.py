@@ -7,32 +7,28 @@ import tempfile
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from . import get_with_retry, http_client
-
 _CONTENT_TYPES = {"application/pdf": ".pdf", "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 
 
 def download(url: str, dest_dir: Path | None = None, *, client=None) -> Path:
-    from ..capture import assert_public_url
+    """Fetch `url` (public internet only, see capture.fetch_public) into `dest_dir`."""
+    from ..capture import fetch_public, new_client
 
-    assert_public_url(url)  # never fetch from this machine or the local network
-    dest_dir = dest_dir or Path(tempfile.mkdtemp(prefix="flyer-"))
-    dest_dir.mkdir(parents=True, exist_ok=True)
     own_client = client is None
-    client = client or http_client(event_hooks={"request": [lambda request: assert_public_url(str(request.url))]})
+    client = client or new_client()
     try:
-        response = get_with_retry(client, url)
+        data, content_type, final_url = fetch_public(url, client=client)
     finally:
         if own_client:
             client.close()
-    content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-    name = Path(unquote(urlparse(url).path)).name or "flyer"
-    name = re.sub(r"[^\w.\-]+", "_", name)[:120]
-    suffix = Path(name).suffix.lower()
+    dest_dir = dest_dir or Path(tempfile.mkdtemp(prefix="flyer-"))
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    name = Path(unquote(urlparse(final_url).path)).name or "flyer"
+    stem, suffix = Path(name).stem, Path(name).suffix.lower()
     if suffix not in (".pdf", ".jpg", ".jpeg", ".png", ".webp"):
         if content_type not in _CONTENT_TYPES:
             raise ValueError(f"{url} is not a PDF or image (content-type {content_type or 'unknown'})")
-        name += _CONTENT_TYPES[content_type]
-    path = dest_dir / name
-    path.write_bytes(response.content)
+        stem, suffix = name, _CONTENT_TYPES[content_type]
+    path = dest_dir / (re.sub(r"[^\w.\-]+", "_", stem)[:80] + suffix)
+    path.write_bytes(data)
     return path

@@ -52,6 +52,16 @@ or an account; only Mercadona has no flyer at all. The add-on in `src/pricetrack
 | Products and prices as text (offer pages, shop promotions) | **Send page text** | Reads the offers from the text: cheaper than images, exact prices |
 | Anything else | **Add visible area** / **Add whole page** (Firefox) | Screenshots, collected page by page into one flyer |
 
+Sending a PDF or a page's text is a single request, so closing the popup while the app downloads
+cannot leave half a flyer behind. Page images and screenshots collect into a flyer "in progress" until
+you press **Read now** (in the popup or in the app). The add-on keeps that flyer's store even if you
+change pages; one-off sends use the store guessed from the page you are on.
+
+The add-on was tested end to end in Chromium (same code as Firefox) against a mock flyer site, and it
+passes Mozilla's `web-ext lint`. Firefox-only details (whole-page screenshots, its PDF viewer, local
+network rules) are based on Firefox's documentation and source code, not yet on a run in Firefox, so
+please report anything that behaves differently there.
+
 What the research found per store (October 2026, from web searches; the sites themselves could not be
 opened from the sandbox this was written in, so treat it as a starting point):
 
@@ -84,9 +94,12 @@ uv run pricetracker serve                 # http://127.0.0.1:8000
 Data lives in `data/prices.db` (SQLite; set `PRICETRACKER_DB` to move it). Uploaded flyers are kept
 under `data/flyers/`.
 
-The app only answers on `localhost` / `127.0.0.1`. It rejects form posts that come from other websites,
-and the add-on's API needs the token shown on the Browser add-on page. To reach it from another device,
-run `pricetracker serve --host 0.0.0.0` and list this computer's address in `PRICETRACKER_ALLOWED_HOSTS`.
+The app is meant for this computer: it answers on `localhost` / `127.0.0.1`, refuses form posts and
+framing from other websites, and the add-on's API needs the token shown on the Browser add-on page.
+Links the add-on sends are only downloaded from public internet addresses. To open the app from a phone
+on the same Wi-Fi, run `pricetracker serve --host 0.0.0.0` and list this computer's address in
+`PRICETRACKER_ALLOWED_HOSTS`; other devices are then asked for a password (any user name, the token as
+the password).
 
 ### Command line
 
@@ -147,15 +160,16 @@ src/pricetracker/
   extract.py      Claude vision extraction (prompt + JSON schema)
   flyers.py       PDF/image loading, slicing, page-by-page ingestion
   connectors/     mercadona.py, lidl.py, download.py
-  api.py          JSON API for the browser add-on (draft flyers, links, pages, page text)
-  security.py     localhost protection: add-on token, same-origin forms, host-name check
-  capture.py      download what the add-on found; keep real flyer pages, drop duplicates
+  api.py          JSON API for the browser add-on (one-request sends; drafts for images/screenshots)
+  security.py     localhost protection: add-on token, same-origin forms, host names, framing, LAN password
+  capture.py      download what the add-on found (public addresses only); keep real pages, drop copies
   browser_extension/  the Firefox/Chrome add-on (Manifest V3, popup only)
   importers.py    CSV and manual entry
   queries.py      best price per store, history, review queue
   web.py          FastAPI app; templates/ and static/ (Chart.js 4.4.1 vendored, MIT)
   cli.py          command line
-tests/            parser, matcher, pricing, flyer pipeline (with a fake extractor), connectors, web, add-on API
+tests/            parser, matcher, pricing, flyer pipeline (with a fake extractor), connectors, web,
+                  add-on API, and regressions from the security/robustness review
 ```
 
 Run the tests with `uv run pytest`. They don't call the network or the Claude API.

@@ -5,7 +5,9 @@ from pricetracker import db
 
 @pytest.fixture(autouse=True)
 def _allow_testclient_host(monkeypatch):
+    # TestClient talks to host "testserver" from client address "testclient".
     monkeypatch.setenv("PRICETRACKER_ALLOWED_HOSTS", "testserver")
+    monkeypatch.setenv("PRICETRACKER_TRUSTED_CLIENTS", "testclient")
 
 
 @pytest.fixture
