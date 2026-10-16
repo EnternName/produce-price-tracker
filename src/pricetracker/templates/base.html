@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Price tracker{% endblock %} · Price tracker</title>
+  <link rel="stylesheet" href="/static/style.css">
+  {% block head %}{% endblock %}
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">🥕 Price tracker</a>
+  <nav>
+    {% set path = request.url.path %}
+    <a href="/" class="{{ 'active' if path == '/' }}">Compare</a>
+    <a href="/flyers" class="{{ 'active' if path.startswith('/flyers') or path.startswith('/sources') }}">Flyers &amp; sources</a>
+    <a href="/review" class="{{ 'active' if path == '/review' }}">Review</a>
+    <a href="/products" class="{{ 'active' if path.startswith('/products') }}">Products</a>
+    <a href="/import" class="{{ 'active' if path == '/import' }}">Add prices</a>
+    <a href="/extension" class="{{ 'active' if path.startswith('/extension') }}">Browser add-on</a>
+  </nav>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+{% block scripts %}{% endblock %}
+</body>
+</html>

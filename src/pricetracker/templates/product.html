@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}{{ product.name_es }}{% endblock %}
+{% block content %}
+<h1>{{ product.name_es }}</h1>
+<p class="lead">{% if product.name_ca %}{{ product.name_ca }} · {% endif %}{{ product.category }} · prices per {{ product.base_unit }}</p>
+
+{% if current %}
+<div class="tiles">
+  <div class="tile"><div class="value">{{ current.best.unit_price | unit_price(product.base_unit) }}</div>
+    <div class="label">cheapest now · {{ current.best.store_name }}</div></div>
+  {% if current.stores|length > 1 %}
+  <div class="tile"><div class="value">{{ current.stores[-1].unit_price | unit_price(product.base_unit) }}</div>
+    <div class="label">most expensive · {{ current.stores[-1].store_name }}</div></div>
+  <div class="tile"><div class="value">+{{ (current.spread * 100) | round | int }}%</div><div class="label">price spread</div></div>
+  {% endif %}
+</div>
+
+<h2>Latest price at each store</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Store</th><th class="num">€/{{ product.base_unit }}</th><th class="num">With promo</th><th>Offer</th><th class="num">Price</th><th>Seen</th></tr></thead>
+  <tbody>
+  {% for s in current.stores %}
+  <tr>
+    <td>{{ s.store_name }}{% if s.loyalty_only %} <span class="badge warn">card/app</span>{% endif %}</td>
+    <td class="num {{ 'price-best' if loop.first }}">{{ s.unit_price | unit_price(product.base_unit) }}</td>
+    <td class="num">{% if s.effective_unit_price and s.effective_unit_price < s.unit_price - 0.005 %}{{ s.effective_unit_price | unit_price(product.base_unit) }} <span class="note">{{ s.promo_text }}</span>{% else %}–{% endif %}</td>
+    <td>{{ s.raw_name }}{% if s.brand %} · {{ s.brand }}{% endif %}{% if s.quantity_text %}<div class="note">{{ s.quantity_text }}</div>{% endif %}</td>
+    <td class="num">{{ s.price | eur }}</td>
+    <td class="small">{{ s.observed_on }}{% if s.valid_to %}<div class="note">until {{ s.valid_to }}</div>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<div class="card empty">No prices for this product yet.</div>
+{% endif %}
+
+{% if series %}
+<h2>Price history (€/{{ product.base_unit }}, cheapest offer per day)</h2>
+<form class="filters" method="get">
+  <select name="days" onchange="this.form.submit()" aria-label="Period">
+    {% for d, label in [(30, "Last 30 days"), (90, "Last 90 days"), (365, "Last year"), (3650, "All")] %}
+    <option value="{{ d }}" {{ 'selected' if d == days }}>{{ label }}</option>
+    {% endfor %}
+  </select>
+</form>
+<div class="card chart-card">
+  <div class="chart-box"><canvas id="history" aria-label="Price history chart" role="img"></canvas></div>
+  {% if series|length > 8 %}<p class="note legend-note">Stores beyond the first eight are drawn in grey; hover a line or see the table below.</p>{% endif %}
+</div>
+<script type="application/json" id="series-data">{{ series | tojson }}</script>
+{% endif %}
+
+<h2>All recorded offers</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Date</th><th>Store</th><th>Offer</th><th class="num">Price</th><th class="num">€/{{ product.base_unit }}</th><th>Promo</th><th>Source</th></tr></thead>
+  <tbody>
+  {% for o in observations %}
+  <tr class="{{ 'needs-review' if o.needs_review }}">
+    <td class="small">{{ o.observed_on }}</td>
+    <td>{{ o.store_name }}</td>
+    <td>{{ o.raw_name }}{% if o.brand %} · {{ o.brand }}{% endif %}{% if o.quantity_text %}<div class="note">{{ o.quantity_text }}</div>{% endif %}</td>
+    <td class="num">{{ o.price | eur }}{% if o.regular_price %}<div class="note"><s>{{ o.regular_price | eur }}</s></div>{% endif %}</td>
+    <td class="num">{{ o.unit_price | unit_price(o.price_unit) }}</td>
+    <td class="small">{{ o.promo_text or '' }}</td>
+    <td class="small"><a href="/sources/{{ o.source_id }}#obs-{{ o.id }}">{{ o.source_kind }}</a></td>
+  </tr>
+  {% else %}<tr><td colspan="7" class="empty">Nothing yet.</td></tr>{% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}
+{% block scripts %}
+{% if series %}
+<script src="/static/vendor/chart-4.4.1.umd.min.js"></script>
+<script src="/static/history.js"></script>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Flyers & sources{% endblock %}
+{% block content %}
+<h1>Flyers &amp; sources</h1>
+<p class="lead">Upload a flyer (PDF, or screenshots/photos of its pages from the flyer app) and Claude reads every offer. Or pull prices straight from a store. Browsing flyers in Firefox? The <a href="/extension">browser add-on</a> sends them here in one click.</p>
+
+<div class="cards">
+  <form class="card" method="post" action="/flyers" enctype="multipart/form-data">
+    <h2 style="margin-top:0">Upload a flyer</h2>
+    <label for="store">Store</label>
+    <input id="store" name="store" list="stores" required placeholder="Lidl, Aldi, Bonpreu…">
+    <datalist id="stores">{% for s in stores %}<option value="{{ s.name }}">{% endfor %}</datalist>
+    <label for="files">PDF or page images (several screenshots are fine; tall scrolling screenshots are sliced)</label>
+    <input id="files" type="file" name="files" accept=".pdf,image/png,image/jpeg,image/webp" multiple required>
+    <div class="form-grid">
+      <div><label for="vf">Valid from (optional)</label><input id="vf" type="date" name="valid_from"></div>
+      <div><label for="vt">Valid to (optional)</label><input id="vt" type="date" name="valid_to"></div>
+    </div>
+    <label for="title">Title (optional)</label>
+    <input id="title" name="title" placeholder="Folleto semana 42">
+    <label class="inline" style="margin-top:10px"><input type="checkbox" name="include_non_food" value="true"> also keep non-food items</label>
+    <div class="form-actions"><button type="submit">Upload &amp; read</button></div>
+    <p class="note">Dates printed in the flyer are picked up automatically. Needs an Anthropic API key (ANTHROPIC_API_KEY) on the machine running the app.</p>
+  </form>
+
+  <form class="card" method="post" action="/flyers/url">
+    <h2 style="margin-top:0">Flyer from a link</h2>
+    <label for="store2">Store</label>
+    <input id="store2" name="store" list="stores" required>
+    <label for="url">Link to the PDF (e.g. the “Descargar” button of a store's online folleto)</label>
+    <input id="url" name="url" type="url" required placeholder="https://…/folleto.pdf">
+    <div class="form-grid">
+      <div><label for="vf2">Valid from</label><input id="vf2" type="date" name="valid_from"></div>
+      <div><label for="vt2">Valid to</label><input id="vt2" type="date" name="valid_to"></div>
+    </div>
+    <div class="form-actions"><button type="submit">Download &amp; read</button></div>
+  </form>
+
+  <div class="card">
+    <h2 style="margin-top:0">Pull from a store</h2>
+    <p class="small"><b>Lidl</b> – list this week's leaflets from Lidl's leaflet service and import one.</p>
+    <div class="form-actions"><a class="button" style="padding:7px 12px;border-radius:8px" href="/flyers/lidl">Find Lidl leaflets</a></div>
+    <form method="post" action="/connectors/mercadona" style="margin-top:16px">
+      <p class="small"><b>Mercadona</b> – snapshot every food price in the online shop (takes a few minutes; prices depend on the warehouse serving your area).</p>
+      <label for="wh">Warehouse code (optional)</label>
+      <input id="wh" name="warehouse" placeholder="e.g. bcn1, mad1, vlc1">
+      <div class="form-actions"><button class="secondary" type="submit">Fetch Mercadona prices</button></div>
+    </form>
+  </div>
+</div>
+
+<h2>Recent sources</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Added</th><th>Store</th><th>Source</th><th>Valid</th><th>Status</th><th class="num">Items</th><th class="num">To review</th></tr></thead>
+  <tbody>
+  {% for s in sources %}
+  <tr>
+    <td class="small">{{ s.created_at[:16] }}</td>
+    <td>{{ s.store_name }}</td>
+    <td><a href="/sources/{{ s.id }}">{{ s.title or s.kind }}</a><div class="note">{{ s.kind }}{% if s.language %} · {{ s.language }}{% endif %}</div></td>
+    <td class="small">{% if s.valid_from or s.valid_to %}{{ s.valid_from or '?' }} → {{ s.valid_to or '?' }}{% else %}{{ s.observed_on }}{% endif %}</td>
+    <td class="small status-{{ s.status }}">{{ 'collecting pages' if s.collecting else s.status }}{% if s.status == 'processing' and s.pages_total %} {{ s.pages_done }}/{{ s.pages_total }}{% endif %}{% if s.error %}<div class="note">{{ s.error[:120] }}</div>{% endif %}</td>
+    <td class="num">{{ s.n_items }}</td>
+    <td class="num">{% if s.n_review %}<a href="/sources/{{ s.id }}?review=1">{{ s.n_review }}</a>{% else %}0{% endif %}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="7" class="empty">No flyers or imports yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

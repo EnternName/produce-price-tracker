@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Browser add-on{% endblock %}
+{% block content %}
+<h1>Browser add-on</h1>
+<p class="lead">Read flyers on the stores' websites in Firefox (or Chrome) and send them here with one click, no phone app needed.</p>
+
+<div class="cards">
+  <div class="card">
+    <h2 style="margin-top:0">1 · Install it</h2>
+    <p><a class="button" style="padding:7px 12px;border-radius:8px;display:inline-block" href="/extension/pricetracker-addon.zip">Download the add-on (.zip)</a></p>
+    <p class="small"><b>Firefox (140 or newer):</b> unzip it, open <code>about:debugging#/runtime/this-firefox</code>, click <i>Load Temporary Add-on…</i> and pick
+      <code>manifest.json</code> from the unzipped folder. Firefox removes temporary add-ons when it restarts. To keep it, see “Keep it installed” below.</p>
+    <p class="small"><b>Chrome, Edge, Brave:</b> unzip it, open <code>chrome://extensions</code>, turn on <i>Developer mode</i>, click <i>Load unpacked</i> and pick the folder.</p>
+    <p class="small">Then pin the € button to the toolbar.</p>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">2 · Connect it</h2>
+    <p class="small">Click the add-on's button, open <i>Settings</i>, and paste:</p>
+    <label for="app-url">App address</label>
+    <input id="app-url" readonly value="{{ app_url }}" style="width:100%">
+    <label for="token">Token</label>
+    <div class="row-actions">
+      <input id="token" readonly type="password" value="{{ token }}" style="flex:1;min-width:0">
+      <button class="secondary small" type="button" onclick="const t=document.getElementById('token');t.type=t.type==='password'?'text':'password'">Show</button>
+      <button class="small" type="button" onclick="navigator.clipboard.writeText(document.getElementById('token').value);this.textContent='Copied'">Copy</button>
+    </div>
+    <p class="note">The token stops other websites open in your browser from sending things to this app. It is stored in <code>data/api_token</code>
+      (or set <code>PRICETRACKER_TOKEN</code>); delete the file and restart the app to get a new one.</p>
+  </div>
+</div>
+
+<h2>3 · Use it</h2>
+<div class="cards">
+  <div class="card">
+    <b>PDF flyers</b>
+    <p class="small">On a flyer page with a “Descargar”/“Descarregar” button or a PDF link (Consum, Dia, Aldi, Ahorramás, Plusfresc…), the add-on lists the PDFs. Click <i>Send PDF</i>.
+      On Lidl's online viewer it finds the leaflet's PDF for you. A PDF already open in Firefox can be sent with <i>Send this tab's address</i>.</p>
+  </div>
+  <div class="card">
+    <b>Online viewers</b>
+    <p class="small">Viewers load one large image per page. Flip through every page, then click <i>Add page images</i>: thumbnails, logos and duplicate copies are skipped. Press <i>Read now</i> when done.</p>
+  </div>
+  <div class="card">
+    <b>Offer pages with prices as text</b>
+    <p class="small">Pages that list products and prices (Carrefour's campaign pages, Aldi's offers page, online-shop promotion lists) can be sent as text with <i>Send page text</i>.
+      Scroll to the bottom first so everything has loaded. Text is cheaper for Claude to read than images and prices are copied exactly.</p>
+  </div>
+  <div class="card">
+    <b>Anything else: screenshots</b>
+    <p class="small"><i>Add visible area</i> works on any page. Show a page, add it, move on, add the next one, then <i>Read now</i>. Firefox can also capture the whole scrolling page in one go.</p>
+  </div>
+</div>
+
+<h2>Keep it installed (Firefox)</h2>
+<div class="card small">
+  <p>Release versions of Firefox only keep add-ons that Mozilla has signed. Signing your own copy is free and automatic, and it is not published anywhere (an “unlisted” add-on):</p>
+  <ol>
+    <li>Create API credentials at <code>addons.mozilla.org/developers/addon/api/key/</code> (any Firefox account works).</li>
+    <li>Run, in the unzipped add-on folder: <code>npx web-ext sign --channel=unlisted --api-key=… --api-secret=…</code></li>
+    <li>Open the signed <code>.xpi</code> it produces with Firefox. Signing is automatic and usually takes minutes (up to a day if Mozilla picks it for a manual check).</li>
+  </ol>
+  <p>Firefox Developer Edition, Nightly and ESR can instead install it unsigned once <code>xpinstall.signatures.required</code> is set to <code>false</code> in <code>about:config</code>.</p>
+</div>
+
+<h2>What gets sent where</h2>
+<div class="card small">
+  <p>The add-on only talks to this app, at the address above (keep it <code>127.0.0.1</code> or <code>localhost</code>). When you send something, the app downloads the PDF or images itself
+    (only from public internet addresses, never from your home network) and passes the pages, or the page text, to Claude to read the prices.
+    That is why Firefox lists “website content” and “browsing activity” when you install it. It never sends anything on its own: only when you click a button in its popup.</p>
+</div>
+{% endblock %}

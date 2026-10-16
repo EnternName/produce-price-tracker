@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Add prices{% endblock %}
+{% block content %}
+<h1>Add prices</h1>
+<p class="lead">For stores without a flyer or shop feed, or a price you spotted in the shop.</p>
+
+{% if counts %}
+<div class="card" style="margin-bottom:16px">
+  Imported <b>{{ counts.rows }}</b> rows into {{ counts.sources }} source(s){% if counts.skipped %}, skipped {{ counts.skipped }}{% endif %}.
+  {% for e in counts.errors %}<div class="note">{{ e }}</div>{% endfor %}
+  <div class="form-actions"><a href="/">See comparison</a> · <a href="/review">Review</a></div>
+</div>
+{% endif %}
+
+<div class="cards">
+  <form class="card" method="post" action="/import/manual">
+    <h2 style="margin-top:0">One price</h2>
+    <label for="mstore">Store</label>
+    <input id="mstore" name="store" list="stores" required>
+    <datalist id="stores">{% for s in stores %}<option value="{{ s.name }}">{% endfor %}</datalist>
+    <label for="mname">Product as labelled</label>
+    <input id="mname" name="name" required placeholder="Tomàquet de penjar">
+    <div class="form-grid">
+      <div><label for="mqty">Size</label><input id="mqty" name="quantity" placeholder="1 kg, 6 x 1 L, €/kg"></div>
+      <div><label for="mprice">Price (€)</label><input id="mprice" name="price" required inputmode="decimal" placeholder="1,99"></div>
+      <div><label for="mpromo">Promo</label><input id="mpromo" name="promo" placeholder="3x2"></div>
+      <div><label for="mdate">Date</label><input id="mdate" type="date" name="observed_on" value="{{ today }}"></div>
+    </div>
+    <div class="form-actions"><button type="submit">Add</button></div>
+  </form>
+
+  <form class="card" method="post" action="/import/csv" enctype="multipart/form-data">
+    <h2 style="margin-top:0">CSV file</h2>
+    <p class="small">Columns: <code>store, date, product, brand, quantity, price, unit_price, unit, promo, valid_from, valid_to</code>
+      (Spanish headers like <code>tienda, fecha, producto, precio</code> work too; comma or semicolon separated).
+      <a href="/import/template.csv">Download a template</a>.</p>
+    <label for="csv">File</label>
+    <input id="csv" type="file" name="file" accept=".csv,text/csv" required>
+    <label for="cstore">Store for rows without one (optional)</label>
+    <input id="cstore" name="store" list="stores">
+    <div class="form-actions"><button type="submit">Import</button></div>
+  </form>
+</div>
+{% endblock %}

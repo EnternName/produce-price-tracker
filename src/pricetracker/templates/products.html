@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Products{% endblock %}
+{% block content %}
+<h1>Products</h1>
+<p class="lead">Generic products that offers are compared under. Spanish and Catalan names and synonyms are all matched.</p>
+
+<form class="card" method="post" action="/products" style="margin-bottom:20px">
+  <h2 style="margin-top:0">{{ 'Create a product for this item' if obs else 'Add a product' }}</h2>
+  {% if obs %}<input type="hidden" name="obs" value="{{ obs }}">{% endif %}
+  <div class="form-grid">
+    <div><label for="es">Name (Spanish)</label><input id="es" name="name_es" required value="{{ prefill }}"></div>
+    <div><label for="ca">Name (Catalan)</label><input id="ca" name="name_ca"></div>
+    <div><label for="cat">Category</label>
+      <select id="cat" name="category">{% for c in CATEGORIES %}<option>{{ c }}</option>{% endfor %}<option>Otros</option></select></div>
+    <div><label for="unit">Compare per</label>
+      <select id="unit" name="base_unit"><option value="kg">kg</option><option value="L">litre</option><option value="ud">unit</option></select></div>
+  </div>
+  <label for="syn">Other names, comma-separated (noun first: “queso de cabra”, not “cabra queso”)</label>
+  <input id="syn" name="synonyms" style="width:100%">
+  <div class="form-actions"><button type="submit">Save</button></div>
+</form>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Product</th><th>Català</th><th>Category</th><th>Per</th><th class="num">Prices</th><th>Last seen</th></tr></thead>
+  <tbody>
+  {% for p in products %}
+  <tr>
+    <td><a href="/products/{{ p.id }}">{{ p.name_es }}</a>{% if p.user_created %} <span class="badge">yours</span>{% endif %}</td>
+    <td>{{ p.name_ca or '' }}</td>
+    <td class="small">{{ p.category }}</td>
+    <td>{{ p.base_unit }}</td>
+    <td class="num">{{ p.n_obs }}</td>
+    <td class="small">{{ p.last_seen or '' }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Lidl leaflets{% endblock %}
+{% block content %}
+<h1>Lidl leaflets</h1>
+<p class="lead">Current leaflets from Lidl's leaflet service. Importing downloads the PDF and has Claude read it.</p>
+{% if error %}
+<div class="card status-error">Could not list leaflets: {{ error }}
+  <p class="note">The service may have changed. You can still download the PDF from lidl.es (Folletos → Descargar) and upload it on the Flyers page.</p></div>
+{% endif %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Leaflet</th><th>Valid</th><th></th></tr></thead>
+  <tbody>
+  {% for l in leaflets %}
+  <tr>
+    <td>{{ l.title }}<div class="note"><a href="{{ l.pdf_url }}" rel="noopener noreferrer">PDF</a></div></td>
+    <td class="small">{{ l.valid_from or '?' }} → {{ l.valid_to or '?' }}</td>
+    <td>
+      <form method="post" action="/flyers/url">
+        <input type="hidden" name="store" value="Lidl">
+        <input type="hidden" name="url" value="{{ l.pdf_url }}">
+        <input type="hidden" name="title" value="{{ l.title }}">
+        <input type="hidden" name="valid_from" value="{{ l.valid_from or '' }}">
+        <input type="hidden" name="valid_to" value="{{ l.valid_to or '' }}">
+        <button class="small" type="submit">Import</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  {% if not error %}<tr><td colspan="3" class="empty">No leaflets found.</td></tr>{% endif %}
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}
