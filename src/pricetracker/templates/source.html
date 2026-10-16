@@ -23,11 +23,13 @@
   {% if source.status in ('pending', 'processing') and not source.collecting %}<span class="muted"> · this page refreshes by itself</span>{% endif %}
   {% if source.error %}<div class="status-error small" style="margin-top:6px">{{ source.error }}</div>{% endif %}
   <div class="form-actions">
-    {% if source.kind == 'flyer' and source.status not in ('pending', 'processing') and not source.collecting %}
+    {% if source.kind == 'flyer' and source.status != 'processing' and not source.collecting %}
     <form method="post" action="/sources/{{ source.id }}/reprocess"><button class="secondary" type="submit">Read again</button></form>
     {% endif %}
     <a class="small" href="?review={{ 0 if review else 1 }}">{{ 'Show all items' if review else 'Show only items to review' }}</a>
+    {% if source.status != 'processing' %}
     <form method="post" action="/sources/{{ source.id }}/delete" onsubmit="return confirm('Delete this source and all its prices?')"><button class="danger" type="submit">Delete source</button></form>
+    {% endif %}
   </div>
 </div>
 

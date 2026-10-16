@@ -193,10 +193,11 @@ def _process_in_background(source_id: int, include_non_food: bool) -> None:
     conn = db.connect(app.state.db_path)
     try:
         flyers.process_flyer(conn, source_id, include_non_food=include_non_food)
-    except flyers.AlreadyProcessing:
-        log.info("flyer %s is already being read", source_id)
-    except Exception:  # status/error are stored on the source row
+    except (flyers.AlreadyProcessing, flyers.FlyerGone) as e:
+        log.info("%s", e)
+    except Exception as e:  # status/error are stored on the source row
         log.exception("flyer %s failed", source_id)
+        flyers.mark_failed(conn, source_id, e)
     finally:
         conn.close()
 
@@ -204,10 +205,6 @@ def _process_in_background(source_id: int, include_non_food: bool) -> None:
 @app.get("/flyers", response_class=HTMLResponse)
 def flyer_list(request: Request, conn: Conn):
     return render(request, "flyers.html", sources=queries.sources(conn), stores=_stores(conn), today=date.today().isoformat())
-
-
-def _safe_name(name: str) -> str:
-    return re.sub(r"[^\w.\-]+", "_", Path(name).name)[:120] or "upload"
 
 
 @app.post("/flyers")
@@ -226,7 +223,7 @@ async def upload_flyer(
     try:
         paths = []
         for i, upload in enumerate(f for f in files if f.filename):
-            name = _safe_name(upload.filename)
+            name = flyers._safe_name(upload.filename)
             if Path(name).suffix.lower() not in flyers.IMAGE_SUFFIXES | {".pdf"}:
                 raise HTTPException(400, f"{upload.filename}: upload PDF, PNG, JPEG or WebP files")
             path = tmp / f"{i:03d}_{name}"
@@ -330,23 +327,26 @@ def reprocess(background: BackgroundTasks, conn: Conn, source_id: int):
     if source is None or source["kind"] != "flyer":
         raise HTTPException(400, "Only flyers can be re-read")
     queued = conn.execute(
-        "UPDATE sources SET status = 'pending' WHERE id = ? AND status NOT IN ('pending', 'processing') AND collecting = 0",
+        "UPDATE sources SET status = 'pending' WHERE id = ? AND status != 'processing' AND collecting = 0",
         (source_id,),
     ).rowcount
     conn.commit()
-    if queued:  # a double click, or a stale page, must not start a second reading
+    if queued:  # while it is being read nothing is queued; a second click finds it already claimed
         background.add_task(_process_in_background, source_id, False)
     return RedirectResponse(f"/sources/{source_id}", status_code=303)
 
 
 @app.post("/sources/{source_id}/delete")
 def delete_source(conn: Conn, source_id: int):
-    source = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
-    if source is None:
-        raise HTTPException(404)
-    flyers.delete_flyer_files(conn, source)
-    conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
-    conn.commit()
+    with flyers.flyer_lock(source_id):
+        source = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+        if source is None:
+            raise HTTPException(404)
+        if source["status"] == "processing":
+            raise HTTPException(409, "This flyer is being read right now; delete it once it has finished")
+        flyers.delete_flyer_files(conn, source)
+        conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+        conn.commit()
     return RedirectResponse("/flyers", status_code=303)
 
 

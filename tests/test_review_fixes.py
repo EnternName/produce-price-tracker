@@ -2,28 +2,15 @@
 
 import base64
 import io
-import socket
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
 from pricetracker import capture, flyers, web
 from pricetracker.extract import PageResult
-from tests.test_api import EXT_ORIGIN, pdf_bytes, png
+from tests.test_api import pdf_bytes, png
 from tests.test_flyers import FakeExtractor
-
-
-@pytest.fixture
-def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(web.app.state, "db_path", tmp_path / "web.db")
-    monkeypatch.setattr(flyers, "ClaudeExtractor", lambda **kw: FakeExtractor())
-    monkeypatch.delenv("PRICETRACKER_TOKEN", raising=False)
-    with TestClient(web.app) as c:
-        c.token = (tmp_path / "api_token").read_text().strip()
-        c.ext_headers = {"X-Pricetracker-Token": c.token, "Origin": EXT_ORIGIN}
-        yield c
 
 
 def mock_client(routes, seen=None):
@@ -62,14 +49,18 @@ def test_same_template_pages_are_all_kept():
     assert len(result.files) == 12, result.skipped
 
 
+# imgproxy names the source image in base64 (here "s3://leaflets/images/<uuid>/page-03_<hash>.png")
+LIDL_FILE = "czM6Ly9sZWFmbGV0cy9pbWFnZXMvMDE5MmQ0ZTEvcGFnZS0wM181YTkzLnBuZw.jpg"
+
+
 def test_size_variants_of_one_file_are_merged():
     big = text_page(1415, 2400, 18, 3)
     with Image.open(io.BytesIO(big)) as img:
         small = io.BytesIO()
         img.resize((708, 1200), Image.LANCZOS).save(small, format="JPEG", quality=85)
     lidl_like = [
-        capture.inspect("https://imgproxy.example/AbCdEfGhIjKlMnOpQrStUv/rs:fit:708:1200:1/g:no/cGFnZS0wMw.jpg", small.getvalue()),
-        capture.inspect("https://imgproxy.example/ZyXwVuTsRqPoNmLkJiHgFe/rs:fit:1415:2400:1/g:no/cGFnZS0wMw.jpg", big),
+        capture.inspect(f"https://imgproxy.example/AbCdEfGhIjKlMnOpQrStUv/rs:fit:708:1200:1/g:no/{LIDL_FILE}", small.getvalue()),
+        capture.inspect(f"https://imgproxy.example/ZyXwVuTsRqPoNmLkJiHgFe/rs:fit:1415:2400:1/g:no/{LIDL_FILE}", big),
     ]
     result = capture.select_pages(lidl_like)
     assert [f.width for f in result.files] == [1415]
@@ -118,20 +109,6 @@ def test_unreadable_formats_are_converted():
 # --- downloads only reach the public internet ----------------------------------------------------
 
 
-@pytest.fixture
-def dns(monkeypatch):
-    monkeypatch.delenv("PRICETRACKER_ALLOW_PRIVATE_URLS", raising=False)
-    answers = {}
-
-    def fake_getaddrinfo(host, *args, **kwargs):
-        if host not in answers:
-            raise socket.gaierror("no such host")
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0)) for ip in answers[host]]
-
-    monkeypatch.setattr(capture.socket, "getaddrinfo", fake_getaddrinfo)
-    return answers
-
-
 def test_connection_is_pinned_to_the_checked_address(dns):
     dns["cdn.example"] = ["93.184.216.34"]
     seen = []
@@ -139,6 +116,7 @@ def test_connection_is_pinned_to_the_checked_address(dns):
     data, ctype, final = capture.fetch_public("https://cdn.example/p.pdf", client=mock_client(routes, seen))
     assert data[:5] == b"%PDF-" and final == "https://cdn.example/p.pdf"
     assert seen[0].headers["host"] == "cdn.example" and seen[0].extensions["sni_hostname"] == "cdn.example"
+    assert seen[0].headers["connection"] == "close"  # a pooled connection is never reused for another host
 
 
 def test_redirect_into_the_local_network_is_blocked(dns):
@@ -239,7 +217,10 @@ def test_reprocess_while_reading_does_nothing(client, conn, monkeypatch):
     assert calls == []
     with pytest.raises(flyers.AlreadyProcessing):
         flyers.process_flyer(db_conn, draft["id"], extractor=FakeExtractor())
-    assert flyers.reset_interrupted(db_conn) == 1
+    assert flyers.reset_interrupted(db_conn) == 0  # still making progress (e.g. another terminal)
+    db_conn.execute("UPDATE sources SET heartbeat_at = datetime('now', '-2 hours') WHERE id = ?", (draft["id"],))
+    db_conn.commit()
+    assert flyers.reset_interrupted(db_conn) == 1  # stalled: the app that read it has stopped
     db_conn.close()
 
 

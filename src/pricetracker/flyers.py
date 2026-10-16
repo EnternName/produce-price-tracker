@@ -33,6 +33,8 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".avif", ".gif", ".bmp", ".t
 TEXT_SUFFIX = ".txt"  # visible text of a store web page listing offers (from the browser add-on)
 FLYER_SUFFIXES = IMAGE_SUFFIXES | {".pdf", TEXT_SUFFIX}
 TEXT_CHUNK = 12000  # characters of page text per request
+MAX_PDF_PAGES = 150  # same cap as for downloads (capture.MAX_PDF_PAGES)
+IMAGE_FORMATS = ["JPEG", "PNG", "WEBP", "GIF", "AVIF", "BMP", "TIFF"]  # image decoders allowed
 TEXT_OVERLAP = 400  # characters repeated between consecutive text pieces
 
 
@@ -75,6 +77,8 @@ def load_pages(paths: list[Path]) -> list[PageInput]:
         if path.suffix.lower() == ".pdf":
             pdf = pdfium.PdfDocument(str(path))
             try:
+                if len(pdf) > MAX_PDF_PAGES:
+                    raise ValueError(f"{path.name} has {len(pdf)} pages; a flyer has at most {MAX_PDF_PAGES}")
                 for i in range(len(pdf)):
                     page = pdf[i]
                     width, height = page.get_size()
@@ -88,7 +92,7 @@ def load_pages(paths: list[Path]) -> list[PageInput]:
             finally:
                 pdf.close()
         elif path.suffix.lower() in IMAGE_SUFFIXES:
-            with Image.open(path) as img:
+            with Image.open(path, formats=IMAGE_FORMATS) as img:
                 img.load()
                 pages.append(PageInput(len(pages) + 1, slice_image(img)))
         elif path.suffix.lower() == TEXT_SUFFIX:
@@ -289,17 +293,23 @@ def delete_flyer_files(conn: sqlite3.Connection, source) -> None:
         shutil.rmtree(folder, ignore_errors=True)
 
 
-def _offers_from_page(data: dict, page: int, include_non_food: bool, seen: set | None = None) -> list[RawOffer]:
+def _offers_from_page(data: dict, page: int, include_non_food: bool, skip: set | frozenset = frozenset()) -> tuple[list[RawOffer], set]:
+    """Offers on one page, minus repeats within the page and those in `skip` (the previous piece of
+    the same page text, which this one overlaps). Returns (offers, keys seen on this page)."""
     offers = []
-    seen = set() if seen is None else seen
+    seen: set = set()
     for item in data.get("items", []):
         if not include_non_food and not item.get("is_food", True):
             continue
         price = item.get("price")
         if price is None or price <= 0:
             continue
-        key = (fold(item.get("name_printed") or ""), round(price, 2), fold(item.get("quantity_text") or ""))
-        if key in seen:  # overlapping image slices or text pieces can repeat an offer
+        key = (
+            fold(item.get("name_printed") or ""), round(price, 2), fold(item.get("quantity_text") or ""),
+            fold(item.get("brand") or ""), item.get("loyalty_price"), fold(item.get("promo_text") or ""),
+        )
+        if key in seen or key in skip:  # overlapping image slices or text pieces can repeat an offer
+            seen.add(key)
             continue
         seen.add(key)
         base = RawOffer(
@@ -332,21 +342,45 @@ def _offers_from_page(data: dict, page: int, include_non_food: bool, seen: set |
                                       "regular_price": float(price), "promo_text": f"{label} (socio)"}))
         else:
             offers.append(base)
-    return offers
+    return offers, seen
 
 
 class AlreadyProcessing(RuntimeError):
     pass
 
 
+STALE_AFTER_MINUTES = 30  # a reading that has not finished a page for this long has stopped
+
+
 def reset_interrupted(conn: sqlite3.Connection) -> int:
-    """Flyers left 'processing' when the app stopped can be read again (call at startup)."""
+    """Flyers left 'processing' by a stopped app can be read again (call at startup). Readings still
+    making progress, e.g. a `pricetracker flyer` run in another terminal, are left alone."""
     n = conn.execute(
-        "UPDATE sources SET status = 'error', error = 'Interrupted: the app stopped while reading this flyer' "
-        "WHERE status = 'processing'"
+        f"""UPDATE sources SET status = 'error', error = 'Interrupted: the app stopped while reading this flyer'
+            WHERE kind = 'flyer' AND status = 'processing'
+              AND (heartbeat_at IS NULL OR heartbeat_at < datetime('now', '-{STALE_AFTER_MINUTES} minutes'))"""
     ).rowcount
     conn.commit()
     return n
+
+
+def _still_ours(conn: sqlite3.Connection, source_id: int, file_path: str) -> bool:
+    """False once the flyer was deleted (and its id possibly reused by a new flyer)."""
+    row = conn.execute("SELECT file_path FROM sources WHERE id = ?", (source_id,)).fetchone()
+    return row is not None and row["file_path"] == file_path
+
+
+class FlyerGone(RuntimeError):
+    pass
+
+
+def mark_failed(conn: sqlite3.Connection, source_id: int, error: Exception) -> None:
+    """Record a reading that failed before it could start, so the flyer can be read again."""
+    conn.execute(
+        "UPDATE sources SET status = 'error', error = ? WHERE id = ? AND status = 'pending'",
+        (f"Could not start reading: {error}", source_id),
+    )
+    conn.commit()
 
 
 def process_flyer(
@@ -365,8 +399,8 @@ def process_flyer(
     if src is None:
         raise KeyError(source_id)
     claimed = conn.execute(
-        """UPDATE sources SET status = 'processing', collecting = 0, error = NULL, pages_done = 0
-           WHERE id = ? AND status != 'processing'""",
+        """UPDATE sources SET status = 'processing', collecting = 0, error = NULL, pages_done = 0,
+           heartbeat_at = datetime('now') WHERE id = ? AND status != 'processing'""",
         (source_id,),
     ).rowcount
     conn.commit()
@@ -394,7 +428,7 @@ def process_flyer(
     languages: dict[str, int] = {}
     valid_from, valid_to = src["valid_from"], src["valid_to"]
     errors: list[str] = []
-    seen_by_group: dict[str, set] = {}
+    previous_keys: dict[str, set] = {}
 
     def run(page: PageInput):
         return page, extractor.extract(page, store_name=src["store_name"], total_pages=len(pages), today=today)
@@ -416,8 +450,14 @@ def process_flyer(
             valid_from = valid_from or data.get("valid_from")
             valid_to = valid_to or data.get("valid_to")
             group = page.extra.get("group")
-            seen = seen_by_group.setdefault(group, set()) if group else None
-            for offer in _offers_from_page(data, page.number, include_non_food, seen):
+            offers, keys = _offers_from_page(data, page.number, include_non_food, previous_keys.get(group, frozenset()))
+            if group:
+                previous_keys[group] = keys  # the next piece overlaps only this one
+            if not _still_ours(conn, source_id, src["file_path"]):
+                for f in futures:
+                    f.cancel()
+                raise FlyerGone(f"flyer {source_id} was deleted while being read")
+            for offer in offers:
                 offer.valid_from = offer.valid_from or valid_from
                 offer.valid_to = offer.valid_to or valid_to
                 row = build_observation(
@@ -426,7 +466,10 @@ def process_flyer(
                 )
                 insert_observation(conn, row)
                 totals["items"] += 1
-            conn.execute("UPDATE sources SET pages_done = pages_done + 1 WHERE id = ?", (source_id,))
+            conn.execute(
+                "UPDATE sources SET pages_done = pages_done + 1, heartbeat_at = datetime('now') WHERE id = ? AND file_path = ?",
+                (source_id, src["file_path"]),
+            )
             conn.commit()
 
     language = max(languages, key=languages.get) if languages else None
@@ -436,8 +479,9 @@ def process_flyer(
         error = f"{totals['pages_failed']} of {len(pages)} pages failed: {errors[0]}"
     conn.execute(
         """UPDATE sources SET status = ?, error = ?, language = ?, valid_from = ?, valid_to = ?,
-           input_tokens = ?, output_tokens = ? WHERE id = ?""",
-        (status, error, language, valid_from, valid_to, totals["input_tokens"], totals["output_tokens"], source_id),
+           input_tokens = ?, output_tokens = ? WHERE id = ? AND file_path = ?""",
+        (status, error, language, valid_from, valid_to, totals["input_tokens"], totals["output_tokens"],
+         source_id, src["file_path"]),
     )
     conn.execute(
         "UPDATE observations SET valid_from = COALESCE(valid_from, ?), valid_to = COALESCE(valid_to, ?) WHERE source_id = ?",

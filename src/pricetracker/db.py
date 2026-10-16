@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS product_aliases (
 
 -- One flyer, one API snapshot, one CSV import...
 CREATE TABLE IF NOT EXISTS sources (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,  -- ids are never reused after a delete
     store_id INTEGER NOT NULL REFERENCES stores(id),
     kind TEXT NOT NULL CHECK (kind IN ('flyer', 'api', 'csv', 'manual')),
     title TEXT,
@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS sources (
     input_tokens INTEGER,   -- Claude usage for flyer extraction
     output_tokens INTEGER,
     collecting INTEGER NOT NULL DEFAULT 0,  -- draft still receiving pages from the browser add-on
+    heartbeat_at TEXT,      -- last progress of the reading in course (to spot interrupted ones)
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -108,7 +109,7 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     path = Path(path) if path else DEFAULT_DB_PATH
     if str(path) != ":memory:":
         path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=30)  # wait for other writers
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     if str(path) != ":memory:":
@@ -140,6 +141,7 @@ def init_db(conn: sqlite3.Connection) -> None:
 # Columns added after the first release: (table, column, definition)
 _ADDED_COLUMNS = [
     ("sources", "collecting", "INTEGER NOT NULL DEFAULT 0"),
+    ("sources", "heartbeat_at", "TEXT"),
 ]
 
 

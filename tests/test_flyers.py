@@ -141,6 +141,6 @@ def test_reused_source_id_gets_a_clean_folder(conn, flyer_pdf):
     first = flyers.create_flyer_source(conn, store="Lidl", files=[flyer_pdf])
     conn.execute("DELETE FROM sources")  # e.g. a reset database, with the old files still on disk
     second = flyers.create_flyer_source(conn, store="Lidl", collecting=True)
-    assert second == first  # SQLite reuses the id...
+    assert second != first  # ids are not reused (AUTOINCREMENT)...
     row = conn.execute("SELECT file_path FROM sources WHERE id = ?", (second,)).fetchone()
-    assert flyers.source_files(row["file_path"]) == []  # ...but not the old pages
+    assert flyers.source_files(row["file_path"]) == []  # ...and old pages never leak in

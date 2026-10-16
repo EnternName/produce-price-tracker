@@ -48,18 +48,34 @@ function scanFlyerPage() {
     images.set(url, { url, width: width || 0, height: height || 0, how, order: order++ });
   };
 
-  // srcset as the HTML spec splits it: candidates are separated by a comma followed by whitespace,
-  // so CDN URLs with commas in them (".../w_600,q_auto/p1.jpg 600w") stay whole.
-  const srcsetCandidates = (srcset) =>
-    (srcset || "")
-      .trim()
-      .split(/,\s+/)
-      .map((part) => {
-        const [u, size = ""] = part.trim().split(/\s+/);
-        const w = size.endsWith("w") ? parseInt(size, 10) : size.endsWith("x") ? parseFloat(size) * 1000 : 1;
-        return { url: u.replace(/,+$/, ""), w: Number.isFinite(w) ? w : 1 };
-      })
-      .filter((c) => c.url);
+  // srcset parsed as the HTML spec does: a URL is a run of non-space characters (so commas inside it,
+  // as in ".../w_600,q_auto/p1.jpg", stay), trailing commas end a candidate, and a descriptor runs to
+  // the next comma. "a.jpg 600w,b.jpg 1600w" (no space after the comma) is two candidates.
+  const srcsetCandidates = (srcset) => {
+    const s = srcset || "";
+    const out = [];
+    let i = 0;
+    while (i < s.length) {
+      while (i < s.length && /[\s,]/.test(s[i])) i++;
+      if (i >= s.length) break;
+      let j = i;
+      while (j < s.length && !/\s/.test(s[j])) j++;
+      let url = s.slice(i, j);
+      let descriptor = "";
+      if (url.endsWith(",")) {
+        url = url.replace(/,+$/, "");
+      } else {
+        let k = j;
+        while (k < s.length && s[k] !== ",") k++;
+        descriptor = s.slice(j, k).trim();
+        j = k + 1;
+      }
+      i = j;
+      const w = /^\d+w$/.test(descriptor) ? parseInt(descriptor, 10) : /^[\d.]+x$/.test(descriptor) ? parseFloat(descriptor) * 1000 : 1;
+      if (url) out.push({ url, w: Number.isFinite(w) ? w : 1 });
+    }
+    return out;
+  };
   const largestFromSrcset = (srcset) => {
     const candidates = srcsetCandidates(srcset).sort((a, b) => b.w - a.w);
     return candidates.length ? candidates[0].url : null;

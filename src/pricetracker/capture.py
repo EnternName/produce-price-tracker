@@ -19,6 +19,8 @@ import os
 import re
 import socket
 import threading
+import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit
@@ -33,6 +35,9 @@ MAX_BATCH_BYTES = 300 * 1024 * 1024  # per request
 MAX_PIXELS = 30_000_000  # larger images are refused before decoding (a 1415×2400 flyer page is 3.4 Mpx)
 MIN_PAGE_SIDE = 500  # px; smaller images are thumbnails, icons or zoom tiles
 MAX_REDIRECTS = 5
+MAX_SECONDS = 120  # per download, redirects included
+MAX_PDF_PAGES = 150  # a weekly flyer has 10-60 pages; more is not a flyer (and would cost a lot to read)
+IMAGE_FORMATS = ["JPEG", "PNG", "WEBP", "GIF", "AVIF", "BMP", "TIFF"]  # decoders allowed on downloads (JPEG covers MPO)
 BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
 STORED_FORMATS = {"JPEG": ".jpg", "MPO": ".jpg", "PNG": ".png", "WEBP": ".webp", "GIF": ".gif", "AVIF": ".avif"}
 
@@ -52,8 +57,8 @@ def _blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return not ip.is_global or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved
 
 
-def resolve_public(host: str) -> str:
-    """One public IP address for `host`; BlockedURL if it is local/private or cannot be resolved."""
+def resolve_public_all(host: str) -> list[str]:
+    """Every address of `host`, all public; BlockedURL if any is local/private or none resolves."""
     host = host.strip("[]")
     try:
         literal = ipaddress.ip_address(host)
@@ -62,15 +67,19 @@ def resolve_public(host: str) -> str:
     if literal is not None:
         if _blocked(literal):
             raise BlockedURL(f"{host} is a local/private address")
-        return str(literal)
+        return [str(literal)]
     try:
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     except (socket.gaierror, UnicodeError) as e:
         raise BlockedURL(f"can't resolve {host}") from e
-    addresses = [ipaddress.ip_address(info[4][0]) for info in infos]
+    addresses = list(dict.fromkeys(ipaddress.ip_address(info[4][0]) for info in infos))
     if not addresses or any(_blocked(a) for a in addresses):
         raise BlockedURL(f"{host} is a local/private address")
-    return str(addresses[0])
+    return [str(a) for a in addresses]
+
+
+def resolve_public(host: str) -> str:
+    return resolve_public_all(host)[0]
 
 
 def assert_public_url(url: str) -> None:
@@ -99,12 +108,59 @@ class _Budget:
 
 
 def new_client(user_agent: str | None = None) -> httpx.Client:
-    """No proxies from the environment (they would resolve names themselves) and no automatic
-    redirects (each hop is checked by fetch_public)."""
+    """No proxies from the environment (they would resolve names themselves), no automatic redirects
+    (each hop is checked by fetch_public) and no compression (see _read_body)."""
     return httpx.Client(
-        headers={"User-Agent": user_agent or BROWSER_UA, "Accept": "image/avif,image/webp,image/*,application/pdf,*/*"},
+        headers={
+            "User-Agent": user_agent or BROWSER_UA,
+            "Accept": "image/avif,image/webp,image/*,application/pdf,*/*",
+            "Accept-Encoding": "identity",
+        },
         timeout=30, follow_redirects=False, trust_env=False,
     )
+
+
+def _read_body(response: httpx.Response, max_bytes: int, budget: _Budget | None, deadline: float) -> bytes:
+    """Read the raw body with every limit applied to the *decoded* size as it grows, so a few KB of
+    gzip cannot expand into gigabytes (httpx would decode each chunk in full before any check)."""
+    encoding = response.headers.get("content-encoding", "").strip().lower()
+    if response.is_stream_consumed:  # an in-memory response (mock transports): already complete
+        raw_chunks, encoding = [response.content], ""
+    else:
+        raw_chunks = response.iter_raw()
+    if encoding in ("", "identity"):
+        decoder = None
+    elif encoding in ("gzip", "x-gzip"):
+        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    elif encoding == "deflate":
+        decoder = zlib.decompressobj()
+    else:
+        raise ValueError(f"unsupported content encoding ({encoding[:40]})")
+    chunks, size = [], 0
+
+    def keep(piece: bytes) -> None:
+        nonlocal size
+        size += len(piece)
+        if size > max_bytes:
+            raise ValueError("file too large")
+        if budget:
+            budget.take(len(piece))
+        chunks.append(piece)
+
+    for raw in raw_chunks:
+        if time.monotonic() > deadline:
+            raise ValueError("download took too long")
+        if decoder is None:
+            keep(raw)
+            continue
+        data = raw
+        while data:
+            try:
+                keep(decoder.decompress(data, 64 * 1024))
+            except zlib.error as e:
+                raise ValueError("corrupt compressed download") from e
+            data = decoder.unconsumed_tail
+    return b"".join(chunks)
 
 
 def fetch_public(
@@ -114,40 +170,49 @@ def fetch_public(
     referer: str | None = None,
     max_bytes: int = MAX_BYTES,
     budget: _Budget | None = None,
+    max_seconds: float = MAX_SECONDS,
 ) -> tuple[bytes, str, str]:
-    """GET `url` from the public internet only: the host is resolved once, checked, and the connection
-    is made to exactly that address (TLS still verifies the real host name), so a DNS answer that
-    changes between check and connect cannot redirect it to the local network. Redirects are followed
-    by hand with the same check. Returns (body, content type, final URL)."""
+    """GET `url` from the public internet only: the host is resolved once, every address checked, and
+    the connection is made to exactly those addresses (TLS still verifies the real host name), so a
+    DNS answer that changes between check and connect cannot redirect it to the local network.
+    Redirects are followed by hand with the same check. Returns (body, content type, final URL)."""
+    deadline = time.monotonic() + max_seconds
     for _ in range(MAX_REDIRECTS + 1):
-        parts = urlsplit(url)
-        if parts.scheme not in ("http", "https") or not parts.hostname:
+        try:
+            parsed = httpx.URL(url)
+        except httpx.InvalidURL as e:
+            raise BlockedURL(f"invalid link: {e}") from e
+        if parsed.scheme not in ("http", "https") or not parsed.raw_host:
             raise BlockedURL(f"not an http(s) link: {url[:80]}")
+        host = parsed.raw_host.decode("ascii")  # punycode for international names
         headers = {"Referer": referer} if referer else {}
-        target: str | httpx.URL = url
+        targets: list[str | httpx.URL] = [url]
         extensions = {}
         if not _allow_private():
-            ip = resolve_public(parts.hostname)
-            target = httpx.URL(url).copy_with(host=ip)
-            host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
-            headers["Host"] = f"{host}:{parts.port}" if parts.port else host
-            if parts.scheme == "https":
-                extensions["sni_hostname"] = parts.hostname
-        with client.stream("GET", target, headers=headers, extensions=extensions) as response:
-            if response.is_redirect and "location" in response.headers:
-                url = urljoin(url, response.headers["location"])
-                continue
-            response.raise_for_status()
-            chunks, size = [], 0
-            for chunk in response.iter_bytes():
-                size += len(chunk)
-                if size > max_bytes:
-                    raise ValueError("file too large")
-                if budget:
-                    budget.take(len(chunk))
-                chunks.append(chunk)
-            content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-            return b"".join(chunks), content_type, url
+            targets = [parsed.copy_with(host=ip) for ip in resolve_public_all(host)]
+            headers["Host"] = parsed.netloc.decode("ascii")
+            # A pooled connection is keyed by IP and was verified for whichever host opened it:
+            # never let a request for another host name reuse it.
+            headers["Connection"] = "close"
+            if parsed.scheme == "https":
+                extensions["sni_hostname"] = host
+        for i, target in enumerate(targets):
+            try:
+                with client.stream("GET", target, headers=headers, extensions=extensions) as response:
+                    if response.is_redirect and "location" in response.headers:
+                        url = urljoin(url, response.headers["location"])
+                        break
+                    response.raise_for_status()
+                    body = _read_body(response, max_bytes, budget, deadline)
+                    content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+                    return body, content_type, url
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                if i == len(targets) - 1:
+                    raise  # every address failed
+        else:
+            continue
+        if time.monotonic() > deadline:
+            raise ValueError("download took too long")
     raise ValueError("too many redirects")
 
 
@@ -174,8 +239,15 @@ class CaptureResult:
 SIGNATURE_SIDE = 96
 ALIKE_MAX_MEAN_DIFF = 8.0  # grey levels (0-255), averaged over the thumbnail
 _SIZE_PARAMS = {"w", "h", "width", "height", "size", "s", "q", "quality", "dpr", "scale", "format", "fm", "fit", "resize", "zoom"}
-_SIZE_SEGMENT = re.compile(r"^(\d{2,5}(x\d{0,5})?|[a-z]{1,4}[_-]\d+.*|.*[:,].*|(thumb|small|medium|large|zoom|hires|lowres|original|full)\w*)$", re.I)
+# Path segments that only say which size/quality to serve: "1415x2400", "w_1600", "w_600,q_auto",
+# "rs:fit:1415:2400:1", "zoom". A bare number ("/10/") is often the page number, so it never matches.
+_SIZE_SEGMENT = re.compile(
+    r"^(\d{2,5}x\d{2,5}|(w|h|s|q|c|dpr|width|height|size)[_:-]\d+([,][a-z_]+[_:-]?\w*)*|[^/]*[:,][^/]*"
+    r"|(thumb|thumbnail|small|medium|large|xlarge|zoom|hires|lowres|original|full|preview)s?)$",
+    re.I,
+)
 _TOKEN_SEGMENT = re.compile(r"^[A-Za-z0-9_-]{20,}$")
+_TOKEN_FILE = re.compile(r"^[A-Za-z0-9_=-]{24,}\.[a-z]{3,4}$", re.I)
 
 
 def signature(img: Image.Image) -> bytes:
@@ -188,11 +260,14 @@ def asset_key(url: str) -> str:
     or `p1.jpg?width=1000` and `p1.jpg?width=2400`, share a key while `p1.jpg` and `p2.jpg` don't."""
     parts = urlsplit(url)
     segments = [seg for seg in parts.path.split("/") if seg]
+    # A signature folder that changes with the size (imgproxy: /<signature>/rs:fit:../<base64 source>.jpg)
+    # is only ignored when the file name itself identifies the source image.
+    signed = bool(segments) and bool(_TOKEN_FILE.match(segments[-1]))
     keep = []
     for i, seg in enumerate(segments):
         last = i == len(segments) - 1
-        if not last and (_SIZE_SEGMENT.match(seg) or _TOKEN_SEGMENT.match(seg)):
-            keep.append("*")  # size spec, or a signature that changes with the size (imgproxy)
+        if not last and (_SIZE_SEGMENT.match(seg) or (signed and _TOKEN_SEGMENT.match(seg))):
+            keep.append("*")
         else:
             keep.append(seg)
     query = sorted(kv for kv in parts.query.split("&") if kv and kv.split("=")[0].lower() not in _SIZE_PARAMS)
@@ -233,12 +308,16 @@ def inspect(url: str, data: bytes) -> Fetched:
         import pypdfium2 as pdfium
 
         try:
-            pdfium.PdfDocument(data).close()
+            doc = pdfium.PdfDocument(data)
+            pages = len(doc)
+            doc.close()
         except Exception as e:
             raise ValueError("not a readable PDF") from e
+        if pages > MAX_PDF_PAGES:
+            raise ValueError(f"PDF has {pages} pages; a flyer has at most {MAX_PDF_PAGES}")
         return Fetched(url, data, "pdf", digest=digest, suffix=".pdf")
     try:
-        img = Image.open(io.BytesIO(data))
+        img = Image.open(io.BytesIO(data), formats=IMAGE_FORMATS)
     except Exception as e:  # PIL raises many types for non-images
         raise ValueError("not a PDF or a readable image") from e
     with img:
@@ -264,14 +343,14 @@ def pdf_link_in_json(data: bytes) -> str | None:
     """The first PDF link inside a JSON document (flyer viewers often fetch one describing the flyer)."""
     if data[:1] not in (b"{", b"["):
         return None
-    try:
-        parsed = json.loads(data)
-    except ValueError:
-        return None
     from .connectors.lidl import find_leaflets
 
-    leaflets = find_leaflets(parsed)
-    return leaflets[0].pdf_url if leaflets else None
+    try:
+        leaflets = find_leaflets(json.loads(data))
+    except (ValueError, RecursionError):  # not JSON, or nested absurdly deep
+        return None
+    url = leaflets[0].pdf_url if leaflets else None
+    return url if isinstance(url, str) else None
 
 
 def download_all(
@@ -307,6 +386,8 @@ def download_all(
             return inspect(final_url, data)
         except (ValueError, httpx.HTTPError) as e:
             return {"url": url, "reason": str(e) or type(e).__name__}
+        except Exception as e:  # whatever a hostile page serves must not fail the whole send
+            return {"url": url, "reason": f"unusable ({type(e).__name__})"}
 
     try:
         with ThreadPoolExecutor(max_workers=4) as pool:

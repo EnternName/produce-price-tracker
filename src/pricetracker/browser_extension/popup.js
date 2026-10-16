@@ -6,16 +6,19 @@ const JPEG_QUALITY = 90;
 const MAX_URL = 4000;
 const QUICK_TIMEOUT = 8000; // ms, for status checks
 const SEND_TIMEOUT = 300000; // ms: the app may be downloading a 40 MB PDF
-const isFirefox = typeof ext.tabs.captureTab === "function"; // captureTab is Firefox-only
+// runtime.getBrowserInfo exists only in Firefox. (tabs.captureTab is Firefox-only too, but Firefox hides
+// it from add-ons without access to all sites, which this one doesn't ask for.)
+const isFirefox = typeof globalThis.browser?.runtime?.getBrowserInfo === "function";
 const $ = (id) => document.getElementById(id);
 
 let tab = null;
 let scan = null;
 
 class AppError extends Error {
-  constructor(kind, message) {
+  constructor(kind, message, status = 0) {
     super(message);
     this.kind = kind;
+    this.status = status;
   }
 }
 
@@ -50,7 +53,7 @@ async function call(path, { method = "GET", json, form, timeout = 60000 } = {}) 
   if (response.status === 401) throw new AppError("token", "The app needs the token: copy it from the app's “Browser add-on” page into Settings below.");
   if (!response.ok) {
     const detail = typeof data.detail === "string" ? data.detail : data.detail ? JSON.stringify(data.detail) : `HTTP ${response.status}`;
-    throw new AppError("http", detail);
+    throw new AppError("http", detail, response.status);
   }
   return data;
 }
@@ -175,7 +178,8 @@ async function refreshDraft() {
     if (!status.collecting) return saveDraft(null); // finished or read from the app meanwhile
     await saveDraft({ ...draft, files: status.files });
   } catch (e) {
-    if (e.kind === "http") await saveDraft(null); // deleted in the app
+    // Forget it only when the app says it no longer exists; any other error may be passing.
+    if (e.kind === "http" && e.status === 404 && /No such flyer/.test(e.message)) await saveDraft(null);
     else throw e;
   }
 }
@@ -244,29 +248,27 @@ async function captureVisible() {
   return [await ext.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: JPEG_QUALITY })];
 }
 
-async function imageHeight(dataUrl) {
+async function imageSize(dataUrl) {
   const img = new Image();
   img.src = dataUrl;
   await img.decode();
-  return img.naturalHeight;
+  return { width: img.naturalWidth, height: img.naturalHeight };
 }
 
 async function captureFullPage() {
-  // Firefox accepts a `rect` beyond the visible area. captureVisibleTab works with the permission the
-  // toolbar click grants; captureTab would need access to all sites, so it is only a fallback.
+  // Firefox's captureVisibleTab accepts a `rect` beyond the visible area, with the permission the
+  // toolbar click grants. The result is scaled by the page zoom, so check its shape, not its size.
   const { width, height } = scan.page;
   const shots = [];
   for (let y = 0; y < height; y += SLICE_HEIGHT) {
     const rect = { x: 0, y, width, height: Math.min(SLICE_HEIGHT, height - y) };
-    const options = { format: "jpeg", quality: JPEG_QUALITY, rect, scale: 1 };
-    let shot = await ext.tabs.captureVisibleTab(tab.windowId, options);
-    if ((await imageHeight(shot)) < rect.height * 0.9) {
-      try {
-        shot = await ext.tabs.captureTab(tab.id, options);
-      } catch (e) {
-        if (!shots.length) throw new AppError("input", "This Firefox could only capture the visible area: use “Add visible area” page by page.");
-        break;
-      }
+    const shot = await ext.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: JPEG_QUALITY, rect, scale: 1 });
+    const size = await imageSize(shot);
+    const expectedRatio = rect.height / rect.width;
+    if (size.height / size.width < expectedRatio * 0.9) {
+      // Only the visible area came back: this Firefox ignores `rect`.
+      if (!shots.length) throw new AppError("input", "This Firefox could only capture the visible area: use “Add visible area” page by page.");
+      break;
     }
     shots.push(shot);
   }

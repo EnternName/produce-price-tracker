@@ -125,6 +125,8 @@ def fetch(conn: sqlite3.Connection, warehouse: str = DEFAULT_WAREHOUSE, *, produ
             insert_observation(conn, row)
             counts["products"] += 1
             counts["matched"] += row["product_id"] is not None
+            if counts["products"] % 200 == 0:
+                conn.commit()  # don't hold the database's write lock for the whole crawl
         conn.execute("UPDATE sources SET status = 'done' WHERE id = ?", (source_id,))
     except Exception as e:
         conn.execute("UPDATE sources SET status = 'error', error = ? WHERE id = ?", (str(e), source_id))

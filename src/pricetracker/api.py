@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
@@ -198,14 +199,24 @@ def _save_downloaded(conn, flyer_id: int, file_path: str, items: list[capture.Fe
     flyers.record_origins(Path(file_path), {path.name: item.url for path, item in zip(written, items, strict=True)})
 
 
+@contextmanager
+def _gone_as_409():
+    """The flyer's files vanished under us (deleted from the app meanwhile)."""
+    try:
+        yield
+    except (KeyError, FileNotFoundError) as e:
+        raise HTTPException(409, "This flyer was deleted in the app") from e
+
+
 def _process(db_path, flyer_id: int) -> None:
     conn = db.connect(db_path)
     try:
         flyers.process_flyer(conn, flyer_id)
-    except flyers.AlreadyProcessing:
-        log.info("flyer %s is already being read", flyer_id)
-    except Exception:
+    except (flyers.AlreadyProcessing, flyers.FlyerGone) as e:
+        log.info("%s", e)
+    except Exception as e:
         log.exception("flyer %s failed", flyer_id)
+        flyers.mark_failed(conn, flyer_id, e)
     finally:
         conn.close()
 
@@ -276,7 +287,7 @@ def add_urls(flyer_id: int, body: FlyerUrls, conn: Conn, request: Request):
     # Downloading can take a while; the draft is re-checked (and compared with its pages as they are
     # by then) only when the results are written.
     fetched, skipped = capture.download_all(body.urls, page_url=body.page_url, user_agent=body.user_agent)
-    with flyers.flyer_lock(flyer_id):
+    with flyers.flyer_lock(flyer_id), _gone_as_409():
         row = _draft(conn, flyer_id)
         result = capture.select_pages(fetched, _saved_pages(row["file_path"]))
         for old, new in result.replaced:
@@ -304,7 +315,7 @@ async def add_pages(flyer_id: int, conn: Conn, request: Request, files: Annotate
         if len(data) > MAX_UPLOAD_BYTES:
             raise HTTPException(413, f"{name} is larger than 40 MB")
         blobs.append((name, data))
-    with flyers.flyer_lock(flyer_id):
+    with flyers.flyer_lock(flyer_id), _gone_as_409():
         _draft(conn, flyer_id)
         try:
             flyers.add_flyer_files(conn, flyer_id, blobs=blobs)
@@ -317,7 +328,9 @@ async def add_pages(flyer_id: int, conn: Conn, request: Request, files: Annotate
 def add_text(flyer_id: int, body: PageText, conn: Conn, request: Request):
     """The visible text of a store page that lists products and prices (cheaper and more exact than
     reading screenshots of it)."""
-    with flyers.flyer_lock(flyer_id):
+    if len(body.text.strip()) < MIN_TEXT_CHARS:
+        raise HTTPException(422, "There is hardly any text on this page")
+    with flyers.flyer_lock(flyer_id), _gone_as_409():
         _draft(conn, flyer_id)
         flyers.add_flyer_files(conn, flyer_id, blobs=[("page.txt", flyers.page_text_blob(body.text, body.page_url))])
     return {**_summary(conn, _flyer(conn, flyer_id), request), "chunks": len(flyers.chunk_text(body.text))}
